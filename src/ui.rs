@@ -143,8 +143,54 @@ pub fn display_buy_menu(game: &GameState) {
     println!();
 }
 
-/// Handles buying inventory - loops until user chooses to exit
+/// Represents an item in the shopping cart
+struct CartItem {
+    product_id: u32,
+    product_name: String,
+    quantity: u32,
+    unit_price: f64,
+}
+
+impl CartItem {
+    fn total(&self) -> f64 {
+        self.unit_price * self.quantity as f64
+    }
+}
+
+/// Displays the shopping cart
+fn display_cart(cart: &[CartItem], player_cash: f64) {
+    if cart.is_empty() {
+        println!("  Cart is empty.");
+    } else {
+        println!("  {:3} {:20} {:>6} {:>10} {:>12}", "#", "Product", "Qty", "Unit $", "Subtotal");
+        println!("  {:─<3} {:─<20} {:─>6} {:─>10} {:─>12}", "", "", "", "", "");
+        for (idx, item) in cart.iter().enumerate() {
+            println!(
+                "  {:>3} {:20} {:>6} {:>10.2} {:>12.2}",
+                idx + 1,
+                item.product_name,
+                item.quantity,
+                item.unit_price,
+                item.total()
+            );
+        }
+        let cart_total: f64 = cart.iter().map(|i| i.total()).sum();
+        println!("  {:─<3} {:─<20} {:─>6} {:─>10} {:─>12}", "", "", "", "", "");
+        println!("  {:24} {:>6} {:>10} ${:>11.2}", "TOTAL", "", "", cart_total);
+        println!();
+        let remaining = player_cash - cart_total;
+        if remaining >= 0.0 {
+            println!("  After purchase: ${:.2}", remaining);
+        } else {
+            println!("  WARNING: ${:.2} over budget!", -remaining);
+        }
+    }
+}
+
+/// Handles buying inventory with cart system
 pub fn handle_buy_inventory(game: &mut GameState) {
+    let mut cart: Vec<CartItem> = Vec::new();
+
     loop {
         clear_screen();
         display_buy_menu(game);
@@ -152,46 +198,186 @@ pub fn handle_buy_inventory(game: &mut GameState) {
         println!("Your cash: ${:.2}", game.player.cash);
         println!();
 
-        let product_id = match read_number("Enter product ID (0 to return to menu): ") {
-            Some(0) => return,
-            Some(id) => id,
-            None => {
-                println!("Invalid product ID.");
-                continue;
-            }
-        };
-
-        if game.get_product(product_id).is_none() {
-            println!("Product not found.");
-            continue;
-        }
-
-        let quantity = match read_number("Enter quantity (0 to cancel): ") {
-            Some(0) => continue,
-            Some(q) => q,
-            None => {
-                println!("Invalid quantity.");
-                continue;
-            }
-        };
-
-        match game.buy_inventory(product_id, quantity) {
-            Ok(cost) => {
-                let product_name = game.get_product(product_id).map(|p| p.name.clone()).unwrap_or_default();
-                println!();
-                println!("SUCCESS! Bought {} x {} for ${:.2}", quantity, product_name, cost);
-                println!("Remaining cash: ${:.2}", game.player.cash);
-            }
-            Err(e) => {
-                println!();
-                println!("ERROR: {}", e);
-            }
-        }
-
+        // Display cart
+        println!("╔══════════════════════════════════════════════════════════════╗");
+        println!("║                    SHOPPING CART                             ║");
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        display_cart(&cart, game.player.cash);
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║  [A] Add item    [R] Remove item    [C] Checkout    [0] Cancel║");
+        println!("╚══════════════════════════════════════════════════════════════╝");
         println!();
-        let choice = read_input("Buy another? [Y/n]: ");
-        if choice.to_lowercase() == "n" {
-            return;
+
+        let input = read_input("Enter choice: ").to_lowercase();
+
+        match input.trim() {
+            "0" => return,
+            "a" => {
+                // Add item to cart
+                let product_id = match read_number("Enter product ID: ") {
+                    Some(id) => id,
+                    None => {
+                        println!("Invalid product ID.");
+                        wait_for_enter();
+                        continue;
+                    }
+                };
+
+                let product = match game.get_product(product_id) {
+                    Some(p) => p.clone(),
+                    None => {
+                        println!("Product not found.");
+                        wait_for_enter();
+                        continue;
+                    }
+                };
+
+                let quantity = match read_number("Enter quantity: ") {
+                    Some(0) => continue,
+                    Some(q) => q,
+                    None => {
+                        println!("Invalid quantity.");
+                        wait_for_enter();
+                        continue;
+                    }
+                };
+
+                let unit_price = game
+                    .market
+                    .get_wholesale_price(product_id)
+                    .unwrap_or(product.base_price);
+
+                // Check if product already in cart, if so add to quantity
+                if let Some(existing) = cart.iter_mut().find(|i| i.product_id == product_id) {
+                    existing.quantity += quantity;
+                    println!("Updated {} quantity to {}", product.name, existing.quantity);
+                } else {
+                    cart.push(CartItem {
+                        product_id,
+                        product_name: product.name.clone(),
+                        quantity,
+                        unit_price,
+                    });
+                    println!("Added {} x {} to cart", quantity, product.name);
+                }
+                wait_for_enter();
+            }
+            "r" => {
+                // Remove item from cart
+                if cart.is_empty() {
+                    println!("Cart is empty.");
+                    wait_for_enter();
+                    continue;
+                }
+
+                let item_num = match read_number("Enter item # to remove (0 to cancel): ") {
+                    Some(0) => continue,
+                    Some(n) if n > 0 && (n as usize) <= cart.len() => n as usize - 1,
+                    _ => {
+                        println!("Invalid item number.");
+                        wait_for_enter();
+                        continue;
+                    }
+                };
+
+                let removed = cart.remove(item_num);
+                println!("Removed {} from cart", removed.product_name);
+                wait_for_enter();
+            }
+            "c" => {
+                // Checkout
+                if cart.is_empty() {
+                    println!("Cart is empty. Add items first!");
+                    wait_for_enter();
+                    continue;
+                }
+
+                let cart_total: f64 = cart.iter().map(|i| i.total()).sum();
+
+                if cart_total > game.player.cash {
+                    println!(
+                        "Not enough cash! Need ${:.2}, have ${:.2}",
+                        cart_total, game.player.cash
+                    );
+                    wait_for_enter();
+                    continue;
+                }
+
+                // Confirm purchase
+                println!();
+                println!("Confirm purchase of {} items for ${:.2}?", cart.len(), cart_total);
+                let confirm = read_input("[Y/n]: ");
+                if confirm.to_lowercase() == "n" {
+                    continue;
+                }
+
+                // Process all purchases
+                let mut success_count = 0;
+                let mut total_spent = 0.0;
+
+                for item in &cart {
+                    match game.buy_inventory(item.product_id, item.quantity) {
+                        Ok(cost) => {
+                            success_count += 1;
+                            total_spent += cost;
+                        }
+                        Err(e) => {
+                            println!("Failed to buy {}: {}", item.product_name, e);
+                        }
+                    }
+                }
+
+                println!();
+                println!("═══════════════════════════════════════════════════════════════");
+                println!("  PURCHASE COMPLETE!");
+                println!("  Bought {} item types for ${:.2}", success_count, total_spent);
+                println!("  Remaining cash: ${:.2}", game.player.cash);
+                println!("═══════════════════════════════════════════════════════════════");
+                wait_for_enter();
+                return;
+            }
+            _ => {
+                // Try to parse as product ID for quick add
+                if let Ok(product_id) = input.trim().parse::<u32>() {
+                    if let Some(product) = game.get_product(product_id) {
+                        let product = product.clone();
+                        let quantity = match read_number("Enter quantity: ") {
+                            Some(0) => continue,
+                            Some(q) => q,
+                            None => {
+                                println!("Invalid quantity.");
+                                wait_for_enter();
+                                continue;
+                            }
+                        };
+
+                        let unit_price = game
+                            .market
+                            .get_wholesale_price(product_id)
+                            .unwrap_or(product.base_price);
+
+                        if let Some(existing) = cart.iter_mut().find(|i| i.product_id == product_id)
+                        {
+                            existing.quantity += quantity;
+                        } else {
+                            cart.push(CartItem {
+                                product_id,
+                                product_name: product.name.clone(),
+                                quantity,
+                                unit_price,
+                            });
+                        }
+                        println!("Added {} x {} to cart", quantity, product.name);
+                        wait_for_enter();
+                    } else {
+                        println!("Invalid choice or product ID.");
+                        wait_for_enter();
+                    }
+                } else {
+                    println!("Invalid choice. Use A/R/C/0 or enter a product ID.");
+                    wait_for_enter();
+                }
+            }
         }
     }
 }
