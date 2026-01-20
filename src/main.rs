@@ -1,7 +1,8 @@
 use capitalism_tycoon::game::GameState;
 use capitalism_tycoon::ui::{
-    clear_screen, display_day_result, display_goodbye, display_header, display_menu,
-    display_store, display_welcome, handle_buy_inventory, handle_set_prices, MenuChoice,
+    clear_screen, display_bankruptcy, display_day_result, display_goodbye, display_header,
+    display_menu, display_store, display_welcome, handle_buy_inventory, handle_manage_staff,
+    handle_manage_stores, handle_set_prices, MenuChoice,
 };
 
 fn main() {
@@ -13,6 +14,12 @@ fn main() {
 
     // Main game loop
     loop {
+        // Check for bankruptcy
+        if game.is_bankrupt {
+            display_bankruptcy(&game);
+            break;
+        }
+
         clear_screen();
         display_header(&game);
 
@@ -29,6 +36,12 @@ fn main() {
             MenuChoice::AdvanceDay => {
                 let result = game.advance_day();
                 display_day_result(&result, game.day);
+            }
+            MenuChoice::ManageStores => {
+                handle_manage_stores(&mut game);
+            }
+            MenuChoice::ManageStaff => {
+                handle_manage_staff(&mut game);
             }
             MenuChoice::Quit => {
                 display_goodbye(&game);

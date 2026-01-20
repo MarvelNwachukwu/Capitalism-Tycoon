@@ -19,22 +19,75 @@ impl InventoryItem {
     }
 }
 
+/// Represents an employee working at a store
+#[derive(Debug, Clone)]
+pub struct Employee {
+    pub name: String,
+    pub salary: f64,
+}
+
+impl Employee {
+    /// Creates a new employee with the given name and default salary
+    pub fn new(name: &str) -> Self {
+        Employee {
+            name: name.to_string(),
+            salary: 50.0, // $50/day default salary
+        }
+    }
+}
+
 /// Represents a retail store
 #[derive(Debug)]
 pub struct Store {
+    pub id: u32,
     pub name: String,
     pub inventory: HashMap<u32, InventoryItem>,
     pub daily_customers: u32,
+    pub employees: Vec<Employee>,
+    pub daily_rent: f64,
 }
 
 impl Store {
-    /// Creates a new store with the given name
-    pub fn new(name: &str) -> Self {
+    /// Creates a new store with the given name and ID
+    pub fn new(id: u32, name: &str) -> Self {
         Store {
+            id,
             name: name.to_string(),
             inventory: HashMap::new(),
             daily_customers: 50, // Base number of daily customers
+            employees: Vec::new(),
+            daily_rent: 100.0, // $100/day default rent
         }
+    }
+
+    /// Hires a new employee (max 3 employees per store)
+    pub fn hire_employee(&mut self, name: &str) -> Result<(), String> {
+        if self.employees.len() >= 3 {
+            return Err("Maximum of 3 employees per store".to_string());
+        }
+        self.employees.push(Employee::new(name));
+        Ok(())
+    }
+
+    /// Fires an employee by index
+    pub fn fire_employee(&mut self, index: usize) -> Result<Employee, String> {
+        if index >= self.employees.len() {
+            return Err("Invalid employee index".to_string());
+        }
+        Ok(self.employees.remove(index))
+    }
+
+    /// Calculates total daily expenses (rent + salaries)
+    pub fn daily_expenses(&self) -> f64 {
+        let total_salaries: f64 = self.employees.iter().map(|e| e.salary).sum();
+        self.daily_rent + total_salaries
+    }
+
+    /// Calculates effective customer count (base + employee bonus)
+    /// Each employee adds 20% more customers, max 3 employees (+60%)
+    pub fn effective_customers(&self) -> u32 {
+        let bonus_multiplier = 1.0 + (self.employees.len() as f64 * 0.2);
+        (self.daily_customers as f64 * bonus_multiplier) as u32
     }
 
     /// Adds inventory to the store
