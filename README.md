@@ -26,8 +26,8 @@ Capitalism Tycoon is a terminal-based economic simulation where you play as a re
 ### Installation
 
 ```bash
-git clone <repository-url>
-cd capitalism_tycoon
+git clone https://github.com/MarvelNwachukwu/Capitalism-Tycoon.git
+cd Capitalism-Tycoon
 cargo build --release
 ```
 
