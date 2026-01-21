@@ -1,5 +1,6 @@
 use crate::economy::Market;
 use crate::game::{DayResult, GameState};
+use crate::loan::{Loan, LoanType};
 use crate::product::Product;
 use std::io::{self, Write};
 
@@ -13,6 +14,7 @@ pub enum MenuChoice {
     ManageStores,
     ManageStaff,
     ManageFactories,
+    ManageLoans,
     Quit,
 }
 
@@ -26,6 +28,8 @@ pub fn clear_screen() {
 pub fn display_header(game: &GameState) {
     let current_store = game.current_store();
     let daily_expenses = game.total_daily_expenses();
+    let economic_state = &game.market.economic_state;
+    let total_debt = game.player.total_debt();
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║              BUSINESS TYCOON - Rust Edition                  ║");
@@ -41,6 +45,11 @@ pub fn display_header(game: &GameState) {
         current_store.name,
         daily_expenses
     );
+    println!(
+        "║  Economy: {:12} │  Total Debt: ${:>12.2}       ║",
+        economic_state.name(),
+        total_debt
+    );
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
 }
@@ -55,11 +64,12 @@ pub fn display_menu() -> MenuChoice {
     println!("  [5] Manage stores");
     println!("  [6] Manage staff");
     println!("  [7] Manage factories");
-    println!("  [8] Quit game");
+    println!("  [8] Manage loans");
+    println!("  [9] Quit game");
     println!();
 
     loop {
-        let input = read_input("Enter choice (1-8): ");
+        let input = read_input("Enter choice (1-9): ");
         match input.trim() {
             "1" => return MenuChoice::ViewStore,
             "2" => return MenuChoice::BuyInventory,
@@ -68,8 +78,9 @@ pub fn display_menu() -> MenuChoice {
             "5" => return MenuChoice::ManageStores,
             "6" => return MenuChoice::ManageStaff,
             "7" => return MenuChoice::ManageFactories,
-            "8" => return MenuChoice::Quit,
-            _ => println!("Invalid choice. Please enter 1-8."),
+            "8" => return MenuChoice::ManageLoans,
+            "9" => return MenuChoice::Quit,
+            _ => println!("Invalid choice. Please enter 1-9."),
         }
     }
 }
@@ -480,7 +491,19 @@ pub fn display_day_result(result: &DayResult, new_day: u32, game: &GameState) {
     );
     println!("╠══════════════════════════════════════════════════════════════╣");
 
+    // Economic state section
+    println!(
+        "║  ECONOMY: {:12} (Sales {:>3}%, Prices {:>3}%)             ║",
+        result.economic_state.name(),
+        (result.economic_state.sales_multiplier() * 100.0) as i32,
+        (result.economic_state.price_multiplier() * 100.0) as i32
+    );
+    if let Some(ref change) = result.economic_change {
+        println!("║    >>> {} <<<                           ║", change);
+    }
+
     // Sales section
+    println!("╠══════════════════════════════════════════════════════════════╣");
     println!("║  SALES:                                                      ║");
     if result.sales_by_product.is_empty() {
         println!("║    No sales today. Check your prices or stock!               ║");
@@ -539,6 +562,54 @@ pub fn display_day_result(result: &DayResult, new_day: u32, game: &GameState) {
         "║    Total Expenses: ${:>10.2}                               ║",
         result.total_expenses
     );
+
+    // Loan section (if there are any loan-related events)
+    let has_loan_events = result.loan_interest_accrued > 0.01
+        || !result.loan_payments.is_empty()
+        || !result.loans_due.is_empty()
+        || !result.loans_due_soon.is_empty()
+        || result.term_loan_penalties > 0.01;
+
+    if has_loan_events {
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║  LOANS:                                                      ║");
+
+        if result.loan_interest_accrued > 0.01 {
+            println!(
+                "║    Interest accrued: ${:>10.2}                             ║",
+                result.loan_interest_accrued
+            );
+        }
+
+        for (loan_id, amount) in &result.loan_payments {
+            println!(
+                "║    Auto-payment (Loan #{}): ${:>10.2}                      ║",
+                loan_id, amount
+            );
+        }
+
+        for (loan_id, amount) in &result.loans_due {
+            println!(
+                "║    TERM LOAN #{} DUE: ${:>10.2}                            ║",
+                loan_id, amount
+            );
+        }
+
+        if result.term_loan_penalties > 0.01 {
+            println!(
+                "║    DEFAULT PENALTY: ${:>10.2}                              ║",
+                result.term_loan_penalties
+            );
+        }
+
+        // Warnings for upcoming due loans
+        for (loan_id, days, balance) in &result.loans_due_soon {
+            println!(
+                "║    WARNING: Loan #{} due in {} day(s)! (${:.2})           ║",
+                loan_id, days, balance
+            );
+        }
+    }
 
     // Net profit section
     println!("╠══════════════════════════════════════════════════════════════╣");
@@ -1343,21 +1414,20 @@ fn handle_start_production(game: &mut GameState) {
     );
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!(
-        "║  {:2} {:20} {:>8} {:>8} {:>8}       ║",
-        "ID", "Recipe", "Days", "Cost", "Status"
+        "║  {:2} {:20} {:>5} {:>8} {:>6}              ║",
+        "ID", "Recipe", "Days", "Cost", "Max"
     );
-    println!("║  {:─<2} {:─<20} {:─>8} {:─>8} {:─>8}       ║", "", "", "", "", "");
+    println!("║  {:─<2} {:─<20} {:─>5} {:─>8} {:─>6}              ║", "", "", "", "", "");
 
     for recipe in &game.recipes {
         let material_cost = recipe.material_cost(|id| {
             game.market.get_wholesale_price(id).unwrap_or(0.0)
         });
-        let can_make = factory.has_ingredients(recipe);
-        let status = if can_make { "Ready" } else { "Missing" };
+        let max_producible = factory.max_producible(recipe);
 
         println!(
-            "║  {:>2} {:20} {:>5} d ${:>7.0} {:>8}       ║",
-            recipe.id, recipe.name, recipe.production_days, material_cost, status
+            "║  {:>2} {:20} {:>3} d ${:>7.0} {:>6}              ║",
+            recipe.id, recipe.name, recipe.production_days, material_cost, max_producible
         );
     }
 
@@ -1367,14 +1437,19 @@ fn handle_start_production(game: &mut GameState) {
     // Show current raw materials
     println!("Your raw materials:");
     let factory = game.current_factory().unwrap();
+    let mut has_materials = false;
     for (product_id, quantity) in &factory.raw_materials {
         if *quantity > 0 {
+            has_materials = true;
             let name = game
                 .get_product(*product_id)
                 .map(|p| p.name.as_str())
                 .unwrap_or("Unknown");
             println!("  {} x {}", quantity, name);
         }
+    }
+    if !has_materials {
+        println!("  (None - buy raw materials first!)");
     }
     println!();
 
@@ -1397,29 +1472,66 @@ fn handle_start_production(game: &mut GameState) {
         }
     };
 
+    let max_producible = game.max_producible(recipe_id).unwrap_or(0);
+
     // Show recipe details
     println!();
     println!("Recipe: {}", recipe.name);
-    println!("Requires:");
+    println!("Requires (per batch):");
     for ing in &recipe.ingredients {
         let name = game
             .get_product(ing.product_id)
             .map(|p| p.name.as_str())
             .unwrap_or("Unknown");
         let have = game.current_factory().unwrap().get_raw_material(ing.product_id);
-        let status = if have >= ing.quantity { "OK" } else { "NEED" };
-        println!("  {} x {} (have: {}) [{}]", ing.quantity, name, have, status);
+        let batches = if ing.quantity > 0 { have / ing.quantity } else { 0 };
+        println!("  {} x {} (have: {}, enough for {} batches)", ing.quantity, name, have, batches);
     }
-    println!("Production time: {} day(s)", recipe.production_days);
+    println!("Production time: {} day(s) per batch", recipe.production_days);
+    println!("Max producible now: {} (limited by slots and materials)", max_producible);
     println!();
 
-    let confirm = read_input("Start production? [Y/n]: ");
-    if confirm.to_lowercase() == "n" {
+    if max_producible == 0 {
+        println!("Cannot produce this recipe - check slots and materials!");
+        wait_for_enter();
         return;
     }
 
-    match game.start_production(recipe_id) {
-        Ok(()) => {
+    // Ask for quantity
+    let quantity = if max_producible == 1 {
+        // Only 1 possible, just confirm
+        let confirm = read_input("Start 1 batch? [Y/n]: ");
+        if confirm.to_lowercase() == "n" {
+            return;
+        }
+        1
+    } else {
+        // Multiple possible, ask for quantity
+        println!("How many batches to produce? (1-{}, or 'all' for max)", max_producible);
+        let input = read_input("Quantity: ");
+
+        if input.to_lowercase() == "all" {
+            max_producible
+        } else {
+            match input.parse::<u32>() {
+                Ok(0) => return,
+                Ok(q) if q <= max_producible => q,
+                Ok(q) => {
+                    println!("Reducing to maximum: {}", max_producible);
+                    wait_for_enter();
+                    max_producible.min(q)
+                }
+                Err(_) => {
+                    println!("Invalid quantity.");
+                    wait_for_enter();
+                    return;
+                }
+            }
+        }
+    };
+
+    match game.start_production_batch(recipe_id, quantity) {
+        Ok(started) => {
             let output_name = game
                 .get_product(recipe.output_product_id)
                 .map(|p| p.name.as_str())
@@ -1427,8 +1539,13 @@ fn handle_start_production(game: &mut GameState) {
             println!();
             println!("Production started!");
             println!(
-                "Will produce {} x {} in {} day(s)",
-                recipe.output_quantity, output_name, recipe.production_days
+                "Queued {} batch(es) - will produce {} x {} each in {} day(s)",
+                started, recipe.output_quantity, output_name, recipe.production_days
+            );
+            println!(
+                "Total output: {} x {}",
+                started * recipe.output_quantity,
+                output_name
             );
         }
         Err(e) => {
@@ -1730,6 +1847,455 @@ fn handle_buy_new_factory(game: &mut GameState) {
             println!("ERROR: {}", e);
         }
     }
+    wait_for_enter();
+}
+
+// ==================== LOAN MANAGEMENT ====================
+
+/// Handles loan management submenu
+pub fn handle_manage_loans(game: &mut GameState) {
+    loop {
+        clear_screen();
+        let economic_state = &game.market.economic_state;
+        let base_rate = economic_state.interest_rate();
+
+        println!("╔══════════════════════════════════════════════════════════════╗");
+        println!("║                      MANAGE LOANS                            ║");
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!(
+            "║  Your cash: ${:>10.2}    │    Total debt: ${:>10.2}    ║",
+            game.player.cash,
+            game.player.total_debt()
+        );
+        println!(
+            "║  Max borrowable: ${:>10.2}  (Limit: ${:>10.2})          ║",
+            game.player.max_borrowable(),
+            Loan::MAX_TOTAL_DEBT
+        );
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!(
+            "║  Economy: {:12}  │  Base interest rate: {:>5.1}%       ║",
+            economic_state.name(),
+            base_rate * 100.0
+        );
+        println!("╠══════════════════════════════════════════════════════════════╣");
+
+        // Display current loans
+        if game.player.loans.is_empty() {
+            println!("║  No active loans.                                            ║");
+        } else {
+            println!("║  Active Loans:                                               ║");
+            for loan in &game.player.loans {
+                let loan_type_name = loan.loan_type.name();
+                let days_info = match loan.days_remaining {
+                    Some(days) => format!("{} days left", days),
+                    None => "No term".to_string(),
+                };
+                println!(
+                    "║    #{}: {} - ${:.2} @ {}  ({})    ║",
+                    loan.id,
+                    loan_type_name,
+                    loan.balance,
+                    loan.display_rate(),
+                    days_info
+                );
+            }
+        }
+
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║  [1] View all loans                                          ║");
+        println!("║  [2] Take out a loan                                         ║");
+        println!("║  [3] Make a payment                                          ║");
+        println!("║  [4] View loan details                                       ║");
+        println!("║  [0] Back to main menu                                       ║");
+        println!("╚══════════════════════════════════════════════════════════════╝");
+        println!();
+
+        let input = read_input("Enter choice: ");
+        match input.trim() {
+            "0" => return,
+            "1" => display_all_loans(game),
+            "2" => handle_take_loan(game),
+            "3" => handle_make_payment(game),
+            "4" => handle_view_loan_details(game),
+            _ => println!("Invalid choice."),
+        }
+    }
+}
+
+/// Displays detailed info about all loans
+fn display_all_loans(game: &GameState) {
+    clear_screen();
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                       ALL LOANS                              ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+
+    if game.player.loans.is_empty() {
+        println!("║  No active loans.                                            ║");
+    } else {
+        println!(
+            "║  {:>3} {:15} {:>12} {:>10} {:>10}       ║",
+            "ID", "Type", "Balance", "Rate", "Term"
+        );
+        println!("║  {:─>3} {:─>15} {:─>12} {:─>10} {:─>10}       ║", "", "", "", "", "");
+
+        for loan in &game.player.loans {
+            let term = match loan.days_remaining {
+                Some(days) => format!("{} days", days),
+                None => "-".to_string(),
+            };
+            println!(
+                "║  {:>3} {:15} ${:>10.2} {:>9.1}% {:>10}       ║",
+                loan.id,
+                loan.loan_type.name(),
+                loan.balance,
+                loan.interest_rate * 100.0,
+                term
+            );
+        }
+
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!(
+            "║  Total debt: ${:>10.2}                                     ║",
+            game.player.total_debt()
+        );
+    }
+
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    wait_for_enter();
+}
+
+/// Handles taking out a new loan
+fn handle_take_loan(game: &mut GameState) {
+    if game.player.max_borrowable() < Loan::MIN_LOAN {
+        println!("You have reached your maximum debt limit!");
+        wait_for_enter();
+        return;
+    }
+
+    clear_screen();
+    let economic_state = &game.market.economic_state;
+
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                     TAKE OUT A LOAN                          ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!(
+        "║  Economy: {:12}  │  Base rate: {:>5.1}%                  ║",
+        economic_state.name(),
+        economic_state.interest_rate() * 100.0
+    );
+    println!(
+        "║  Max borrowable: ${:>10.2}                                 ║",
+        game.player.max_borrowable()
+    );
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  Loan Types:                                                 ║");
+    println!("║                                                              ║");
+
+    let flexible_rate = game.get_current_loan_rate(&LoanType::Flexible);
+    let loc_rate = game.get_current_loan_rate(&LoanType::LineOfCredit);
+    let term_rate = game.get_current_loan_rate(&LoanType::TermLoan);
+
+    println!(
+        "║  [1] Flexible Loan ({:.1}% annual)                            ║",
+        flexible_rate * 100.0
+    );
+    println!("║      - Pay any amount anytime, no minimum payment            ║");
+    println!("║      - Most flexibility, highest interest                    ║");
+    println!("║                                                              ║");
+    println!(
+        "║  [2] Line of Credit ({:.1}% annual)                           ║",
+        loc_rate * 100.0
+    );
+    println!("║      - Auto-deducts 2% of balance daily (min $10)            ║");
+    println!("║      - Can pay extra manually, medium interest               ║");
+    println!("║                                                              ║");
+    println!(
+        "║  [3] Term Loan ({:.1}% annual)                                ║",
+        term_rate * 100.0
+    );
+    println!("║      - Full amount due at end of term (7/14/30 days)         ║");
+    println!("║      - Lowest rate, penalty if you can't pay when due        ║");
+    println!("║                                                              ║");
+    println!("║  [0] Cancel                                                  ║");
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    let loan_type = loop {
+        let input = read_input("Choose loan type (1-3, 0 to cancel): ");
+        match input.trim() {
+            "0" => return,
+            "1" => break LoanType::Flexible,
+            "2" => break LoanType::LineOfCredit,
+            "3" => break LoanType::TermLoan,
+            _ => println!("Invalid choice. Enter 1, 2, 3, or 0."),
+        }
+    };
+
+    let max_loan = game.player.max_borrowable().min(Loan::MAX_LOAN);
+    println!();
+    println!(
+        "Loan amount (${:.2} - ${:.2}):",
+        Loan::MIN_LOAN,
+        max_loan
+    );
+
+    let amount = match read_float("Enter amount: $") {
+        Some(a) if a > 0.0 => a,
+        _ => {
+            println!("Invalid amount.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    // For term loans, also ask for duration
+    let days = if loan_type == LoanType::TermLoan {
+        println!();
+        println!("Term length:");
+        println!("  [1] 7 days");
+        println!("  [2] 14 days (-0.5% rate)");
+        println!("  [3] 30 days (-1.0% rate)");
+
+        let days = loop {
+            let input = read_input("Choose term (1-3): ");
+            match input.trim() {
+                "1" => break 7u32,
+                "2" => break 14u32,
+                "3" => break 30u32,
+                _ => println!("Invalid choice. Enter 1, 2, or 3."),
+            }
+        };
+        Some(days)
+    } else {
+        None
+    };
+
+    // Confirm
+    let rate = match loan_type {
+        LoanType::Flexible => flexible_rate,
+        LoanType::LineOfCredit => loc_rate,
+        LoanType::TermLoan => {
+            let base = term_rate;
+            match days {
+                Some(14) => (base - 0.005).max(0.01),
+                Some(30) => (base - 0.01).max(0.01),
+                _ => base,
+            }
+        }
+    };
+
+    println!();
+    println!("Confirm loan:");
+    println!("  Type: {}", loan_type.name());
+    println!("  Amount: ${:.2}", amount);
+    println!("  Annual Rate: {:.1}%", rate * 100.0);
+    if let Some(d) = days {
+        println!("  Term: {} days", d);
+    }
+
+    let confirm = read_input("Take this loan? [Y/n]: ");
+    if confirm.to_lowercase() == "n" {
+        return;
+    }
+
+    let result = match loan_type {
+        LoanType::Flexible => game.take_flexible_loan(amount),
+        LoanType::LineOfCredit => game.take_line_of_credit(amount),
+        LoanType::TermLoan => game.take_term_loan(amount, days.unwrap()),
+    };
+
+    match result {
+        Ok(loan_id) => {
+            println!();
+            println!("SUCCESS! Loan #{} approved.", loan_id);
+            println!("${:.2} has been added to your cash.", amount);
+            println!("New cash balance: ${:.2}", game.player.cash);
+        }
+        Err(e) => {
+            println!("ERROR: {}", e);
+        }
+    }
+    wait_for_enter();
+}
+
+/// Handles making a payment on a loan
+fn handle_make_payment(game: &mut GameState) {
+    if game.player.loans.is_empty() {
+        println!("You have no active loans.");
+        wait_for_enter();
+        return;
+    }
+
+    clear_screen();
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                     MAKE A PAYMENT                           ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!(
+        "║  Your cash: ${:>10.2}                                      ║",
+        game.player.cash
+    );
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  Your loans:                                                 ║");
+
+    for loan in &game.player.loans {
+        let loan_type_name = loan.loan_type.name();
+        println!(
+            "║    #{}: {} - Balance: ${:.2}                     ║",
+            loan.id, loan_type_name, loan.balance
+        );
+    }
+
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    let loan_id = match read_number("Enter loan # to pay (0 to cancel): ") {
+        Some(0) => return,
+        Some(id) => id,
+        None => {
+            println!("Invalid loan number.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    let loan = match game.player.get_loan(loan_id) {
+        Some(l) => l,
+        None => {
+            println!("Loan not found.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    println!();
+    println!("Loan #{} - {}", loan.id, loan.loan_type.name());
+    println!("Current balance: ${:.2}", loan.balance);
+    println!("Your cash: ${:.2}", game.player.cash);
+    println!();
+    println!("Enter payment amount (or 'all' to pay full balance):");
+
+    let input = read_input("Amount: $");
+    let amount = if input.to_lowercase() == "all" {
+        loan.balance
+    } else {
+        match input.parse::<f64>() {
+            Ok(a) if a > 0.0 => a,
+            _ => {
+                println!("Invalid amount.");
+                wait_for_enter();
+                return;
+            }
+        }
+    };
+
+    match game.make_loan_payment(loan_id, amount) {
+        Ok(paid) => {
+            println!();
+            println!("Payment successful!");
+            println!("Amount paid: ${:.2}", paid);
+
+            // Check if loan was paid off
+            if let Some(loan) = game.player.get_loan(loan_id) {
+                println!("Remaining balance: ${:.2}", loan.balance);
+            } else {
+                println!("Loan has been paid off!");
+            }
+            println!("Your cash: ${:.2}", game.player.cash);
+
+            // Clean up paid-off loans
+            game.player.cleanup_loans();
+        }
+        Err(e) => {
+            println!("ERROR: {}", e);
+        }
+    }
+    wait_for_enter();
+}
+
+/// Displays detailed information about a specific loan
+fn handle_view_loan_details(game: &GameState) {
+    if game.player.loans.is_empty() {
+        println!("You have no active loans.");
+        wait_for_enter();
+        return;
+    }
+
+    println!("Your loans:");
+    for loan in &game.player.loans {
+        println!("  #{}: {} - ${:.2}", loan.id, loan.loan_type.name(), loan.balance);
+    }
+    println!();
+
+    let loan_id = match read_number("Enter loan # to view (0 to cancel): ") {
+        Some(0) => return,
+        Some(id) => id,
+        None => {
+            println!("Invalid loan number.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    let loan = match game.player.get_loan(loan_id) {
+        Some(l) => l,
+        None => {
+            println!("Loan not found.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    clear_screen();
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!(
+        "║                  LOAN #{} DETAILS                             ║",
+        loan.id
+    );
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  Type: {:40}           ║", loan.loan_type.name());
+    println!("║  Description: {}  ║", loan.loan_type.description());
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  Original Principal: ${:>10.2}                            ║", loan.principal);
+    println!("║  Current Balance:    ${:>10.2}                            ║", loan.balance);
+    println!(
+        "║  Interest Accrued:   ${:>10.2}                            ║",
+        loan.balance - loan.principal
+    );
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  Annual Interest Rate: {:>6.2}%                              ║", loan.interest_rate * 100.0);
+    println!(
+        "║  Daily Interest Rate:  {:>6.4}%                             ║",
+        loan.daily_rate() * 100.0
+    );
+    println!(
+        "║  Daily Interest Cost:  ${:>8.2}                             ║",
+        loan.balance * loan.daily_rate()
+    );
+
+    if loan.loan_type == LoanType::LineOfCredit {
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!(
+            "║  Daily Auto-Payment:  ${:>10.2}                           ║",
+            loan.get_auto_payment()
+        );
+    }
+
+    if let Some(days) = loan.days_remaining {
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║  Days Remaining: {:>5}                                      ║", days);
+        if days == 0 {
+            println!("║  STATUS: DUE NOW!                                            ║");
+        } else if days <= 3 {
+            println!("║  WARNING: Coming due soon!                                   ║");
+        }
+        println!(
+            "║  Default Penalty (25%): ${:>10.2}                        ║",
+            loan.default_penalty()
+        );
+    }
+
+    println!("╚══════════════════════════════════════════════════════════════╝");
     wait_for_enter();
 }
 

@@ -1,5 +1,6 @@
-use crate::economy::Market;
+use crate::economy::{EconomicState, Market};
 use crate::factory::ProductionResult;
+use crate::loan::{Loan, LoanType};
 use crate::player::Player;
 use crate::product::Product;
 use crate::recipe::Recipe;
@@ -27,6 +28,14 @@ pub struct DayResult {
     pub expenses_by_factory: Vec<(String, f64, f64)>, // (factory_name, rent, salaries)
     pub production_completed: Vec<ProductionResult>,
     pub net_profit: f64,
+    // New loan-related fields
+    pub economic_state: EconomicState,
+    pub economic_change: Option<String>,       // "Economy improved to Growth!"
+    pub loan_interest_accrued: f64,            // Total interest accrued today
+    pub loan_payments: Vec<(u32, f64)>,        // (loan_id, amount_paid) - auto-payments
+    pub loans_due: Vec<(u32, f64)>,            // Term loans that came due (id, amount)
+    pub loans_due_soon: Vec<(u32, u32, f64)>,  // Warnings: (loan_id, days_remaining, balance)
+    pub term_loan_penalties: f64,              // Penalties for defaulted term loans
 }
 
 impl GameState {
@@ -182,6 +191,28 @@ impl GameState {
         self.player.factories[factory_idx].start_production(&recipe)
     }
 
+    /// Starts batch production at the current factory
+    /// Returns the number of jobs actually started
+    pub fn start_production_batch(&mut self, recipe_id: u32, quantity: u32) -> Result<u32, String> {
+        let factory_idx = self
+            .current_factory
+            .ok_or("No factory selected")?;
+
+        let recipe = self
+            .get_recipe(recipe_id)
+            .ok_or("Recipe not found")?
+            .clone();
+
+        self.player.factories[factory_idx].start_production_batch(&recipe, quantity)
+    }
+
+    /// Gets the max producible quantity for a recipe at the current factory
+    pub fn max_producible(&self, recipe_id: u32) -> Option<u32> {
+        let factory = self.current_factory()?;
+        let recipe = self.get_recipe(recipe_id)?;
+        Some(factory.max_producible(recipe))
+    }
+
     /// Transfers finished goods from factory to store
     pub fn transfer_to_store(
         &mut self,
@@ -266,9 +297,98 @@ impl GameState {
         }
     }
 
+    // ==================== LOAN METHODS ====================
+
+    /// Takes out a new flexible loan
+    pub fn take_flexible_loan(&mut self, amount: f64) -> Result<u32, String> {
+        self.validate_loan_amount(amount)?;
+
+        let rate = self.market.get_loan_rate(&LoanType::Flexible);
+        let loan = Loan::new_flexible(0, amount, rate);
+        let id = self.player.peek_next_loan_id();
+        self.player.add_loan(loan);
+        Ok(id)
+    }
+
+    /// Takes out a new line of credit
+    pub fn take_line_of_credit(&mut self, amount: f64) -> Result<u32, String> {
+        self.validate_loan_amount(amount)?;
+
+        let rate = self.market.get_loan_rate(&LoanType::LineOfCredit);
+        let loan = Loan::new_line_of_credit(0, amount, rate);
+        let id = self.player.peek_next_loan_id();
+        self.player.add_loan(loan);
+        Ok(id)
+    }
+
+    /// Takes out a new term loan with specified duration
+    pub fn take_term_loan(&mut self, amount: f64, days: u32) -> Result<u32, String> {
+        self.validate_loan_amount(amount)?;
+
+        if !matches!(days, 7 | 14 | 30) {
+            return Err("Term loan must be 7, 14, or 30 days".to_string());
+        }
+
+        // Apply term discount: -0.5% for 14 days, -1% for 30 days
+        let base_rate = self.market.get_loan_rate(&LoanType::TermLoan);
+        let rate = match days {
+            14 => (base_rate - 0.005).max(0.01),
+            30 => (base_rate - 0.01).max(0.01),
+            _ => base_rate,
+        };
+
+        let loan = Loan::new_term_loan(0, amount, rate, days);
+        let id = self.player.peek_next_loan_id();
+        self.player.add_loan(loan);
+        Ok(id)
+    }
+
+    /// Validates loan amount against limits
+    fn validate_loan_amount(&self, amount: f64) -> Result<(), String> {
+        if amount < Loan::MIN_LOAN {
+            return Err(format!("Minimum loan is ${:.2}", Loan::MIN_LOAN));
+        }
+        if amount > Loan::MAX_LOAN {
+            return Err(format!("Maximum single loan is ${:.2}", Loan::MAX_LOAN));
+        }
+        if !self.player.can_borrow(amount) {
+            let max_available = self.player.max_borrowable();
+            return Err(format!(
+                "Would exceed maximum debt limit of ${:.2}. You can borrow up to ${:.2} more.",
+                Loan::MAX_TOTAL_DEBT,
+                max_available
+            ));
+        }
+        Ok(())
+    }
+
+    /// Makes a manual payment on a loan
+    pub fn make_loan_payment(&mut self, loan_id: u32, amount: f64) -> Result<f64, String> {
+        if amount <= 0.0 {
+            return Err("Payment amount must be positive".to_string());
+        }
+        if self.player.cash < amount {
+            return Err(format!(
+                "Not enough cash! Have ${:.2}, trying to pay ${:.2}",
+                self.player.cash, amount
+            ));
+        }
+
+        self.player
+            .make_loan_payment(loan_id, amount)
+            .ok_or_else(|| "Loan not found".to_string())
+    }
+
+    /// Gets the current interest rate for a loan type
+    pub fn get_current_loan_rate(&self, loan_type: &LoanType) -> f64 {
+        self.market.get_loan_rate(loan_type)
+    }
+
     /// Advances to the next day and simulates sales for ALL stores
     pub fn advance_day(&mut self) -> DayResult {
-        self.market.advance_day(self.day);
+        // Update economy and get any change message
+        let economic_change = self.market.advance_day(self.day);
+        let economic_state = self.market.economic_state;
 
         let mut total_revenue = 0.0;
         let mut total_items_sold = 0;
@@ -277,6 +397,13 @@ impl GameState {
         let mut expenses_by_store = Vec::new();
         let mut expenses_by_factory = Vec::new();
         let mut production_completed = Vec::new();
+
+        // Loan-related tracking
+        let mut loan_interest_accrued = 0.0;
+        let mut loan_payments = Vec::new();
+        let mut loans_due = Vec::new();
+        let mut loans_due_soon = Vec::new();
+        let mut term_loan_penalties = 0.0;
 
         // Process each store
         let store_count = self.player.stores.len();
@@ -353,6 +480,88 @@ impl GameState {
         // Deduct expenses
         self.player.cash -= total_expenses;
 
+        // ==================== LOAN PROCESSING ====================
+
+        // 1. Accrue interest on all loans
+        for loan in &mut self.player.loans {
+            let old_balance = loan.balance;
+            loan.accrue_interest();
+            loan_interest_accrued += loan.balance - old_balance;
+        }
+
+        // 2. Process auto-payments for line of credit loans
+        let loan_ids: Vec<u32> = self.player.loans.iter().map(|l| l.id).collect();
+        for loan_id in loan_ids {
+            if let Some(loan) = self.player.get_loan(loan_id) {
+                if loan.loan_type == LoanType::LineOfCredit {
+                    let auto_payment = loan.get_auto_payment();
+                    if auto_payment > 0.0 && self.player.cash >= auto_payment {
+                        if let Some(paid) = self.player.make_loan_payment(loan_id, auto_payment) {
+                            loan_payments.push((loan_id, paid));
+                        }
+                    } else if auto_payment > 0.0 {
+                        // Can't afford auto-payment, pay what we can
+                        let available = self.player.cash.max(0.0);
+                        if available > 0.0 {
+                            if let Some(paid) = self.player.make_loan_payment(loan_id, available) {
+                                loan_payments.push((loan_id, paid));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Decrement days remaining on term loans and check for due loans
+        for loan in &mut self.player.loans {
+            if loan.loan_type == LoanType::TermLoan {
+                loan.decrement_days();
+            }
+        }
+
+        // 4. Check for due term loans
+        let due_loan_ids: Vec<(u32, f64)> = self.player.loans
+            .iter()
+            .filter(|l| l.is_due())
+            .map(|l| (l.id, l.balance))
+            .collect();
+
+        for (loan_id, balance) in due_loan_ids {
+            loans_due.push((loan_id, balance));
+
+            // Try to pay off the term loan
+            if self.player.cash >= balance {
+                self.player.make_loan_payment(loan_id, balance);
+            } else {
+                // Can't pay - apply penalty and pay what we can
+                let penalty = self.player.get_loan(loan_id)
+                    .map(|l| l.default_penalty())
+                    .unwrap_or(0.0);
+                term_loan_penalties += penalty;
+
+                // Pay what we can
+                let available = self.player.cash.max(0.0);
+                if available > 0.0 {
+                    self.player.make_loan_payment(loan_id, available);
+                }
+
+                // Add penalty to the loan balance
+                if let Some(loan) = self.player.get_loan_mut(loan_id) {
+                    loan.balance += penalty;
+                }
+            }
+        }
+
+        // 5. Collect warnings for loans coming due soon
+        for loan in &self.player.loans {
+            if let Some(days) = loan.is_due_soon() {
+                loans_due_soon.push((loan.id, days, loan.balance));
+            }
+        }
+
+        // 6. Clean up paid-off loans
+        self.player.cleanup_loans();
+
         // Check for bankruptcy
         if self.player.cash < 0.0 {
             self.is_bankrupt = true;
@@ -360,7 +569,7 @@ impl GameState {
 
         self.day += 1;
 
-        let net_profit = total_revenue - total_expenses;
+        let net_profit = total_revenue - total_expenses - loan_interest_accrued;
 
         DayResult {
             total_revenue,
@@ -371,6 +580,13 @@ impl GameState {
             expenses_by_factory,
             production_completed,
             net_profit,
+            economic_state,
+            economic_change,
+            loan_interest_accrued,
+            loan_payments,
+            loans_due,
+            loans_due_soon,
+            term_loan_penalties,
         }
     }
 }

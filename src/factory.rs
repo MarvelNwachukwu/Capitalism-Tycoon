@@ -223,4 +223,59 @@ impl Factory {
     pub fn total_finished_goods(&self) -> u32 {
         self.finished_goods.values().sum()
     }
+
+    /// Calculates how many times a recipe can be produced given available slots and materials
+    pub fn max_producible(&self, recipe: &Recipe) -> u32 {
+        // Limited by available slots
+        let slot_limit = self.available_slots() as u32;
+        if slot_limit == 0 {
+            return 0;
+        }
+
+        // Limited by ingredients - find the minimum batches we can make
+        let material_limit = recipe
+            .ingredients
+            .iter()
+            .map(|ing| {
+                let have = self.get_raw_material(ing.product_id);
+                have / ing.quantity
+            })
+            .min()
+            .unwrap_or(0);
+
+        slot_limit.min(material_limit)
+    }
+
+    /// Starts production of a recipe multiple times, consuming raw materials
+    /// Returns the number of jobs actually started
+    pub fn start_production_batch(&mut self, recipe: &Recipe, quantity: u32) -> Result<u32, String> {
+        if quantity == 0 {
+            return Err("Quantity must be greater than 0".to_string());
+        }
+
+        let max_possible = self.max_producible(recipe);
+        if max_possible == 0 {
+            if self.available_slots() == 0 {
+                return Err("No available production slots".to_string());
+            } else {
+                return Err("Insufficient raw materials".to_string());
+            }
+        }
+
+        let actual_quantity = quantity.min(max_possible);
+
+        // Start each job
+        for _ in 0..actual_quantity {
+            // Consume raw materials
+            for ing in &recipe.ingredients {
+                if let Some(qty) = self.raw_materials.get_mut(&ing.product_id) {
+                    *qty -= ing.quantity;
+                }
+            }
+            // Add job to queue
+            self.production_queue.push(ProductionJob::new(recipe));
+        }
+
+        Ok(actual_quantity)
+    }
 }
