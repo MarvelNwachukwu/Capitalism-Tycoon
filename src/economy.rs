@@ -26,6 +26,8 @@ impl Market {
         category_demand.insert(Category::Food, 1.2); // Food sells well
         category_demand.insert(Category::Electronics, 0.8); // Electronics are specialty
         category_demand.insert(Category::Clothing, 1.0); // Clothing is average
+        category_demand.insert(Category::Furniture, 0.6); // Furniture is less frequent purchase
+        category_demand.insert(Category::RawMaterial, 0.0); // Raw materials can't be sold retail
 
         Market {
             wholesale_prices,

@@ -1,8 +1,8 @@
 use capitalism_tycoon::game::GameState;
 use capitalism_tycoon::ui::{
     clear_screen, display_bankruptcy, display_day_result, display_goodbye, display_header,
-    display_menu, display_store, display_welcome, handle_buy_inventory, handle_manage_staff,
-    handle_manage_stores, handle_set_prices, MenuChoice,
+    display_menu, display_store, display_welcome, handle_buy_inventory, handle_manage_factories,
+    handle_manage_staff, handle_manage_stores, handle_set_prices, MenuChoice,
 };
 
 fn main() {
@@ -35,13 +35,16 @@ fn main() {
             }
             MenuChoice::AdvanceDay => {
                 let result = game.advance_day();
-                display_day_result(&result, game.day);
+                display_day_result(&result, game.day, &game);
             }
             MenuChoice::ManageStores => {
                 handle_manage_stores(&mut game);
             }
             MenuChoice::ManageStaff => {
                 handle_manage_staff(&mut game);
+            }
+            MenuChoice::ManageFactories => {
+                handle_manage_factories(&mut game);
             }
             MenuChoice::Quit => {
                 display_goodbye(&game);

@@ -1,5 +1,6 @@
 use crate::economy::Market;
 use crate::game::{DayResult, GameState};
+use crate::product::Product;
 use std::io::{self, Write};
 
 /// Menu options for the main game loop
@@ -11,6 +12,7 @@ pub enum MenuChoice {
     AdvanceDay,
     ManageStores,
     ManageStaff,
+    ManageFactories,
     Quit,
 }
 
@@ -52,11 +54,12 @@ pub fn display_menu() -> MenuChoice {
     println!("  [4] Advance to next day (simulate sales)");
     println!("  [5] Manage stores");
     println!("  [6] Manage staff");
-    println!("  [7] Quit game");
+    println!("  [7] Manage factories");
+    println!("  [8] Quit game");
     println!();
 
     loop {
-        let input = read_input("Enter choice (1-7): ");
+        let input = read_input("Enter choice (1-8): ");
         match input.trim() {
             "1" => return MenuChoice::ViewStore,
             "2" => return MenuChoice::BuyInventory,
@@ -64,8 +67,9 @@ pub fn display_menu() -> MenuChoice {
             "4" => return MenuChoice::AdvanceDay,
             "5" => return MenuChoice::ManageStores,
             "6" => return MenuChoice::ManageStaff,
-            "7" => return MenuChoice::Quit,
-            _ => println!("Invalid choice. Please enter 1-7."),
+            "7" => return MenuChoice::ManageFactories,
+            "8" => return MenuChoice::Quit,
+            _ => println!("Invalid choice. Please enter 1-8."),
         }
     }
 }
@@ -120,7 +124,7 @@ pub fn display_store(game: &GameState) {
     wait_for_enter();
 }
 
-/// Displays available products for purchase
+/// Displays available products for purchase (retail goods only, no raw materials)
 pub fn display_buy_menu(game: &GameState) {
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║                  WHOLESALE MARKET                            ║");
@@ -128,7 +132,11 @@ pub fn display_buy_menu(game: &GameState) {
     println!("║  {:3} {:20} {:>12} {:>15}        ║", "ID", "Product", "Price", "Category");
     println!("║  {:─<3} {:─<20} {:─>12} {:─>15}        ║", "", "", "", "");
 
+    // Only show products that can be sold retail (not raw materials)
     for product in &game.products {
+        if !product.product_type.can_sell_retail() {
+            continue;
+        }
         let wholesale = game.market.get_wholesale_price(product.id).unwrap_or(product.base_price);
         println!(
             "║  {:>3} {:20} ${:>10.2} {:>15}        ║",
@@ -463,7 +471,7 @@ pub fn handle_set_prices(game: &mut GameState) {
 }
 
 /// Displays the results of advancing a day
-pub fn display_day_result(result: &DayResult, new_day: u32) {
+pub fn display_day_result(result: &DayResult, new_day: u32, game: &GameState) {
     println!();
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!(
@@ -489,15 +497,44 @@ pub fn display_day_result(result: &DayResult, new_day: u32) {
         result.total_revenue
     );
 
+    // Production section (if any factories)
+    if !result.production_completed.is_empty() {
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║  PRODUCTION COMPLETED:                                       ║");
+        for prod in &result.production_completed {
+            let product_name = game
+                .get_product(prod.product_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("Unknown");
+            println!(
+                "║    {} x {} ({})                              ║",
+                prod.quantity, product_name, prod.recipe_name
+            );
+        }
+    }
+
     // Expenses section
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!("║  EXPENSES:                                                   ║");
+
+    // Store expenses
     for (store_name, rent, salaries) in &result.expenses_by_store {
+        let total = rent + salaries;
         println!(
-            "║    {}: Rent ${:.0} + Salaries ${:.0}                   ║",
-            store_name, rent, salaries
+            "║    Store {}: ${:.0}                                      ║",
+            store_name, total
         );
     }
+
+    // Factory expenses
+    for (factory_name, rent, salaries) in &result.expenses_by_factory {
+        let total = rent + salaries;
+        println!(
+            "║    Factory {}: ${:.0}                                    ║",
+            factory_name, total
+        );
+    }
+
     println!(
         "║    Total Expenses: ${:>10.2}                               ║",
         result.total_expenses
@@ -889,6 +926,805 @@ fn handle_fire_employee(game: &mut GameState) {
                 "New customer count: {}",
                 game.current_store().effective_customers()
             );
+        }
+        Err(e) => {
+            println!("ERROR: {}", e);
+        }
+    }
+    wait_for_enter();
+}
+
+// ==================== FACTORY MANAGEMENT ====================
+
+/// Handles factory management submenu
+pub fn handle_manage_factories(game: &mut GameState) {
+    loop {
+        clear_screen();
+        println!("╔══════════════════════════════════════════════════════════════╗");
+        println!("║                    MANAGE FACTORIES                          ║");
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!(
+            "║  Your cash: ${:>10.2}                                      ║",
+            game.player.cash
+        );
+        println!("╠══════════════════════════════════════════════════════════════╣");
+
+        if game.player.factories.is_empty() {
+            println!("║  No factories yet. Buy one to start manufacturing!          ║");
+        } else {
+            // Display all factories
+            for (idx, factory) in game.player.factories.iter().enumerate() {
+                let current_marker = if Some(idx) == game.current_factory {
+                    "→"
+                } else {
+                    " "
+                };
+                println!(
+                    "║ {} [{}] {:20} │ Jobs: {}/{} │ Workers: {}   ║",
+                    current_marker,
+                    idx + 1,
+                    factory.name,
+                    factory.active_jobs(),
+                    factory.production_slots(),
+                    factory.workers.len()
+                );
+            }
+        }
+
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║  [1] View factory status                                     ║");
+        println!("║  [2] Buy raw materials                                       ║");
+        println!("║  [3] Start production                                        ║");
+        println!("║  [4] Transfer goods to store                                 ║");
+        println!("║  [5] Manage factory workers                                  ║");
+        println!("║  [6] Switch factory                                          ║");
+        println!("║  [7] Buy new factory ($10,000)                               ║");
+        println!("║  [0] Back to main menu                                       ║");
+        println!("╚══════════════════════════════════════════════════════════════╝");
+        println!();
+
+        let input = read_input("Enter choice: ");
+        match input.trim() {
+            "0" => return,
+            "1" => display_factory_status(game),
+            "2" => handle_buy_raw_materials(game),
+            "3" => handle_start_production(game),
+            "4" => handle_transfer_goods(game),
+            "5" => handle_factory_workers(game),
+            "6" => handle_switch_factory(game),
+            "7" => handle_buy_new_factory(game),
+            _ => println!("Invalid choice."),
+        }
+    }
+}
+
+/// Displays detailed factory status
+fn display_factory_status(game: &GameState) {
+    clear_screen();
+
+    if game.current_factory.is_none() {
+        println!("No factory selected. Buy or select a factory first!");
+        wait_for_enter();
+        return;
+    }
+
+    let factory = game.current_factory().unwrap();
+
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!(
+        "║  {:^58}  ║",
+        format!("{} - Status", factory.name)
+    );
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!(
+        "║  Workers: {}/3  │  Production Slots: {}/{}                   ║",
+        factory.workers.len(),
+        factory.active_jobs(),
+        factory.production_slots()
+    );
+    println!(
+        "║  Daily Expenses: ${:.0} (Rent: ${:.0}, Salaries: ${:.0})      ║",
+        factory.daily_expenses(),
+        factory.daily_rent,
+        factory.workers.iter().map(|w| w.salary).sum::<f64>()
+    );
+    println!("╠══════════════════════════════════════════════════════════════╣");
+
+    // Raw materials
+    println!("║  RAW MATERIALS:                                              ║");
+    if factory.raw_materials.is_empty() {
+        println!("║    (None)                                                    ║");
+    } else {
+        for (product_id, quantity) in &factory.raw_materials {
+            if *quantity > 0 {
+                let name = game
+                    .get_product(*product_id)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("Unknown");
+                println!("║    {:30} x {:>6}                   ║", name, quantity);
+            }
+        }
+    }
+
+    // Production queue
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  PRODUCTION IN PROGRESS:                                     ║");
+    if factory.production_queue.is_empty() {
+        println!("║    (None)                                                    ║");
+    } else {
+        for job in &factory.production_queue {
+            let product_name = game
+                .get_product(job.output_product_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("Unknown");
+            println!(
+                "║    {} → {} ({} day(s) left)                        ║",
+                job.recipe_name, product_name, job.days_remaining
+            );
+        }
+    }
+
+    // Finished goods
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  FINISHED GOODS (ready to transfer):                        ║");
+    if factory.finished_goods.is_empty() || factory.total_finished_goods() == 0 {
+        println!("║    (None)                                                    ║");
+    } else {
+        for (product_id, quantity) in &factory.finished_goods {
+            if *quantity > 0 {
+                let name = game
+                    .get_product(*product_id)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("Unknown");
+                println!("║    {:30} x {:>6}                   ║", name, quantity);
+            }
+        }
+    }
+
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    wait_for_enter();
+}
+
+/// Handles buying raw materials for the factory
+fn handle_buy_raw_materials(game: &mut GameState) {
+    if game.current_factory.is_none() {
+        println!("No factory selected. Buy or select a factory first!");
+        wait_for_enter();
+        return;
+    }
+
+    let mut cart: Vec<CartItem> = Vec::new();
+
+    loop {
+        clear_screen();
+
+        // Display raw materials market
+        println!("╔══════════════════════════════════════════════════════════════╗");
+        println!("║                  RAW MATERIALS MARKET                        ║");
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!(
+            "║  {:3} {:25} {:>12}                   ║",
+            "ID", "Material", "Price"
+        );
+        println!("║  {:─<3} {:─<25} {:─>12}                   ║", "", "", "");
+
+        for product in Product::raw_materials() {
+            let wholesale = game
+                .market
+                .get_wholesale_price(product.id)
+                .unwrap_or(product.base_price);
+            println!(
+                "║  {:>3} {:25} ${:>10.2}                   ║",
+                product.id, product.name, wholesale
+            );
+        }
+        println!("╚══════════════════════════════════════════════════════════════╝");
+        println!();
+
+        println!("Your cash: ${:.2}", game.player.cash);
+        println!();
+
+        // Display cart
+        println!("╔══════════════════════════════════════════════════════════════╗");
+        println!("║                    SHOPPING CART                             ║");
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        display_cart(&cart, game.player.cash);
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║  [A] Add item    [R] Remove item    [C] Checkout    [0] Cancel║");
+        println!("╚══════════════════════════════════════════════════════════════╝");
+        println!();
+
+        let input = read_input("Enter choice: ").to_lowercase();
+
+        match input.trim() {
+            "0" => return,
+            "a" => {
+                let product_id = match read_number("Enter material ID: ") {
+                    Some(id) => id,
+                    None => {
+                        println!("Invalid ID.");
+                        wait_for_enter();
+                        continue;
+                    }
+                };
+
+                let product = match game.get_product(product_id) {
+                    Some(p) if p.product_type.is_raw_material() => p.clone(),
+                    _ => {
+                        println!("Not a valid raw material.");
+                        wait_for_enter();
+                        continue;
+                    }
+                };
+
+                let quantity = match read_number("Enter quantity: ") {
+                    Some(0) => continue,
+                    Some(q) => q,
+                    None => {
+                        println!("Invalid quantity.");
+                        wait_for_enter();
+                        continue;
+                    }
+                };
+
+                let unit_price = game
+                    .market
+                    .get_wholesale_price(product_id)
+                    .unwrap_or(product.base_price);
+
+                if let Some(existing) = cart.iter_mut().find(|i| i.product_id == product_id) {
+                    existing.quantity += quantity;
+                } else {
+                    cart.push(CartItem {
+                        product_id,
+                        product_name: product.name.clone(),
+                        quantity,
+                        unit_price,
+                    });
+                }
+                println!("Added {} x {} to cart", quantity, product.name);
+                wait_for_enter();
+            }
+            "r" => {
+                if cart.is_empty() {
+                    println!("Cart is empty.");
+                    wait_for_enter();
+                    continue;
+                }
+
+                let item_num = match read_number("Enter item # to remove (0 to cancel): ") {
+                    Some(0) => continue,
+                    Some(n) if n > 0 && (n as usize) <= cart.len() => n as usize - 1,
+                    _ => {
+                        println!("Invalid item number.");
+                        wait_for_enter();
+                        continue;
+                    }
+                };
+
+                let removed = cart.remove(item_num);
+                println!("Removed {} from cart", removed.product_name);
+                wait_for_enter();
+            }
+            "c" => {
+                if cart.is_empty() {
+                    println!("Cart is empty. Add items first!");
+                    wait_for_enter();
+                    continue;
+                }
+
+                let cart_total: f64 = cart.iter().map(|i| i.total()).sum();
+
+                if cart_total > game.player.cash {
+                    println!(
+                        "Not enough cash! Need ${:.2}, have ${:.2}",
+                        cart_total, game.player.cash
+                    );
+                    wait_for_enter();
+                    continue;
+                }
+
+                // Confirm purchase
+                println!();
+                println!(
+                    "Confirm purchase of {} items for ${:.2}?",
+                    cart.len(),
+                    cart_total
+                );
+                let confirm = read_input("[Y/n]: ");
+                if confirm.to_lowercase() == "n" {
+                    continue;
+                }
+
+                // Process all purchases
+                let mut success_count = 0;
+                let mut total_spent = 0.0;
+
+                for item in &cart {
+                    match game.buy_raw_materials(item.product_id, item.quantity) {
+                        Ok(cost) => {
+                            success_count += 1;
+                            total_spent += cost;
+                        }
+                        Err(e) => {
+                            println!("Failed to buy {}: {}", item.product_name, e);
+                        }
+                    }
+                }
+
+                println!();
+                println!("═══════════════════════════════════════════════════════════════");
+                println!("  PURCHASE COMPLETE!");
+                println!(
+                    "  Bought {} material types for ${:.2}",
+                    success_count, total_spent
+                );
+                println!("  Remaining cash: ${:.2}", game.player.cash);
+                println!("═══════════════════════════════════════════════════════════════");
+                wait_for_enter();
+                return;
+            }
+            _ => {
+                // Try to parse as material ID for quick add
+                if let Ok(product_id) = input.trim().parse::<u32>() {
+                    if let Some(product) = game.get_product(product_id) {
+                        if product.product_type.is_raw_material() {
+                            let product = product.clone();
+                            let quantity = match read_number("Enter quantity: ") {
+                                Some(0) => continue,
+                                Some(q) => q,
+                                None => {
+                                    println!("Invalid quantity.");
+                                    wait_for_enter();
+                                    continue;
+                                }
+                            };
+
+                            let unit_price = game
+                                .market
+                                .get_wholesale_price(product_id)
+                                .unwrap_or(product.base_price);
+
+                            if let Some(existing) =
+                                cart.iter_mut().find(|i| i.product_id == product_id)
+                            {
+                                existing.quantity += quantity;
+                            } else {
+                                cart.push(CartItem {
+                                    product_id,
+                                    product_name: product.name.clone(),
+                                    quantity,
+                                    unit_price,
+                                });
+                            }
+                            println!("Added {} x {} to cart", quantity, product.name);
+                            wait_for_enter();
+                        } else {
+                            println!("Not a raw material.");
+                            wait_for_enter();
+                        }
+                    } else {
+                        println!("Invalid choice or material ID.");
+                        wait_for_enter();
+                    }
+                } else {
+                    println!("Invalid choice. Use A/R/C/0 or enter a material ID.");
+                    wait_for_enter();
+                }
+            }
+        }
+    }
+}
+
+/// Handles starting production
+fn handle_start_production(game: &mut GameState) {
+    if game.current_factory.is_none() {
+        println!("No factory selected. Buy or select a factory first!");
+        wait_for_enter();
+        return;
+    }
+
+    let factory = game.current_factory().unwrap();
+
+    if factory.available_slots() == 0 {
+        println!("No available production slots! Wait for current jobs to complete.");
+        wait_for_enter();
+        return;
+    }
+
+    clear_screen();
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                    START PRODUCTION                          ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!(
+        "║  Available slots: {}/{}                                       ║",
+        factory.available_slots(),
+        factory.production_slots()
+    );
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!(
+        "║  {:2} {:20} {:>8} {:>8} {:>8}       ║",
+        "ID", "Recipe", "Days", "Cost", "Status"
+    );
+    println!("║  {:─<2} {:─<20} {:─>8} {:─>8} {:─>8}       ║", "", "", "", "", "");
+
+    for recipe in &game.recipes {
+        let material_cost = recipe.material_cost(|id| {
+            game.market.get_wholesale_price(id).unwrap_or(0.0)
+        });
+        let can_make = factory.has_ingredients(recipe);
+        let status = if can_make { "Ready" } else { "Missing" };
+
+        println!(
+            "║  {:>2} {:20} {:>5} d ${:>7.0} {:>8}       ║",
+            recipe.id, recipe.name, recipe.production_days, material_cost, status
+        );
+    }
+
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    // Show current raw materials
+    println!("Your raw materials:");
+    let factory = game.current_factory().unwrap();
+    for (product_id, quantity) in &factory.raw_materials {
+        if *quantity > 0 {
+            let name = game
+                .get_product(*product_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("Unknown");
+            println!("  {} x {}", quantity, name);
+        }
+    }
+    println!();
+
+    let recipe_id = match read_number("Enter recipe ID to produce (0 to cancel): ") {
+        Some(0) => return,
+        Some(id) => id,
+        None => {
+            println!("Invalid recipe ID.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    let recipe = match game.get_recipe(recipe_id) {
+        Some(r) => r.clone(),
+        None => {
+            println!("Recipe not found.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    // Show recipe details
+    println!();
+    println!("Recipe: {}", recipe.name);
+    println!("Requires:");
+    for ing in &recipe.ingredients {
+        let name = game
+            .get_product(ing.product_id)
+            .map(|p| p.name.as_str())
+            .unwrap_or("Unknown");
+        let have = game.current_factory().unwrap().get_raw_material(ing.product_id);
+        let status = if have >= ing.quantity { "OK" } else { "NEED" };
+        println!("  {} x {} (have: {}) [{}]", ing.quantity, name, have, status);
+    }
+    println!("Production time: {} day(s)", recipe.production_days);
+    println!();
+
+    let confirm = read_input("Start production? [Y/n]: ");
+    if confirm.to_lowercase() == "n" {
+        return;
+    }
+
+    match game.start_production(recipe_id) {
+        Ok(()) => {
+            let output_name = game
+                .get_product(recipe.output_product_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("Unknown");
+            println!();
+            println!("Production started!");
+            println!(
+                "Will produce {} x {} in {} day(s)",
+                recipe.output_quantity, output_name, recipe.production_days
+            );
+        }
+        Err(e) => {
+            println!("ERROR: {}", e);
+        }
+    }
+    wait_for_enter();
+}
+
+/// Handles transferring goods from factory to store
+fn handle_transfer_goods(game: &mut GameState) {
+    if game.current_factory.is_none() {
+        println!("No factory selected. Buy or select a factory first!");
+        wait_for_enter();
+        return;
+    }
+
+    let factory = game.current_factory().unwrap();
+
+    if factory.total_finished_goods() == 0 {
+        println!("No finished goods to transfer.");
+        wait_for_enter();
+        return;
+    }
+
+    clear_screen();
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                  TRANSFER TO STORE                           ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  Finished goods available:                                   ║");
+
+    let mut available_goods: Vec<(u32, u32, String)> = Vec::new();
+    for (product_id, quantity) in &factory.finished_goods {
+        if *quantity > 0 {
+            let name = game
+                .get_product(*product_id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+            println!("║    ID {:>2}: {:25} x {:>6}            ║", product_id, name, quantity);
+            available_goods.push((*product_id, *quantity, name));
+        }
+    }
+
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  Your stores:                                                ║");
+    for (idx, store) in game.player.stores.iter().enumerate() {
+        println!("║    [{}] {:40}       ║", idx + 1, store.name);
+    }
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    let product_id = match read_number("Enter product ID to transfer (0 to cancel): ") {
+        Some(0) => return,
+        Some(id) => id,
+        None => {
+            println!("Invalid product ID.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    let factory = game.current_factory().unwrap();
+    let available = factory.get_finished_good(product_id);
+    if available == 0 {
+        println!("No finished goods of that type.");
+        wait_for_enter();
+        return;
+    }
+
+    println!("Available: {}", available);
+    let quantity = match read_number("Enter quantity to transfer: ") {
+        Some(0) => return,
+        Some(q) => q,
+        None => {
+            println!("Invalid quantity.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    let store_num = match read_number("Enter store number to transfer to: ") {
+        Some(0) => return,
+        Some(n) if n > 0 && (n as usize) <= game.player.stores.len() => n as usize - 1,
+        _ => {
+            println!("Invalid store number.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    match game.transfer_to_store(product_id, quantity, store_num) {
+        Ok(actual) => {
+            let product_name = game
+                .get_product(product_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("Unknown");
+            let store_name = &game.player.stores[store_num].name;
+            println!();
+            println!(
+                "Transferred {} x {} to {}",
+                actual, product_name, store_name
+            );
+        }
+        Err(e) => {
+            println!("ERROR: {}", e);
+        }
+    }
+    wait_for_enter();
+}
+
+/// Handles factory worker management
+fn handle_factory_workers(game: &mut GameState) {
+    if game.current_factory.is_none() {
+        println!("No factory selected. Buy or select a factory first!");
+        wait_for_enter();
+        return;
+    }
+
+    loop {
+        clear_screen();
+        let factory = game.current_factory().unwrap();
+
+        println!("╔══════════════════════════════════════════════════════════════╗");
+        println!("║                  FACTORY WORKERS                             ║");
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!(
+            "║  Factory: {:20}  │  Cash: ${:>10.2}   ║",
+            factory.name, game.player.cash
+        );
+        println!("╠══════════════════════════════════════════════════════════════╣");
+
+        if factory.workers.is_empty() {
+            println!("║  No workers yet.                                             ║");
+        } else {
+            println!("║  Current Workers:                                            ║");
+            for (idx, worker) in factory.workers.iter().enumerate() {
+                println!(
+                    "║    [{}] {:30} ${:.0}/day          ║",
+                    idx + 1,
+                    worker.name,
+                    worker.salary
+                );
+            }
+        }
+
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!(
+            "║  Production slots: {} (base 2 + {} workers)                  ║",
+            factory.production_slots(),
+            factory.workers.len()
+        );
+        println!(
+            "║  Total daily salaries: ${:>6.0}                               ║",
+            factory.workers.iter().map(|w| w.salary).sum::<f64>()
+        );
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║  [1] Hire worker ($75/day)                                   ║");
+        println!("║  [2] Fire worker                                             ║");
+        println!("║  [0] Back                                                    ║");
+        println!("╚══════════════════════════════════════════════════════════════╝");
+        println!();
+
+        let input = read_input("Enter choice: ");
+        match input.trim() {
+            "0" => return,
+            "1" => {
+                let factory = game.current_factory().unwrap();
+                if factory.workers.len() >= 3 {
+                    println!("Maximum of 3 workers per factory reached!");
+                    wait_for_enter();
+                    continue;
+                }
+
+                let name = read_input("Enter worker name (0 to cancel): ");
+                if name == "0" || name.is_empty() {
+                    continue;
+                }
+
+                match game.current_factory_mut().unwrap().hire_worker(&name) {
+                    Ok(()) => {
+                        println!();
+                        println!("Hired: {}", name);
+                        println!(
+                            "New production slots: {}",
+                            game.current_factory().unwrap().production_slots()
+                        );
+                    }
+                    Err(e) => {
+                        println!("ERROR: {}", e);
+                    }
+                }
+                wait_for_enter();
+            }
+            "2" => {
+                let factory = game.current_factory().unwrap();
+                if factory.workers.is_empty() {
+                    println!("No workers to fire!");
+                    wait_for_enter();
+                    continue;
+                }
+
+                let worker_num =
+                    match read_number("Enter worker number to fire (0 to cancel): ") {
+                        Some(0) => continue,
+                        Some(n) if n > 0 && (n as usize) <= factory.workers.len() => {
+                            n as usize - 1
+                        }
+                        _ => {
+                            println!("Invalid worker number.");
+                            wait_for_enter();
+                            continue;
+                        }
+                    };
+
+                match game.current_factory_mut().unwrap().fire_worker(worker_num) {
+                    Ok(fired) => {
+                        println!();
+                        println!("Fired: {}", fired.name);
+                        println!(
+                            "New production slots: {}",
+                            game.current_factory().unwrap().production_slots()
+                        );
+                    }
+                    Err(e) => {
+                        println!("ERROR: {}", e);
+                    }
+                }
+                wait_for_enter();
+            }
+            _ => println!("Invalid choice."),
+        }
+    }
+}
+
+/// Handles switching between factories
+fn handle_switch_factory(game: &mut GameState) {
+    if game.player.factories.is_empty() {
+        println!("You have no factories. Buy one first!");
+        wait_for_enter();
+        return;
+    }
+
+    if game.player.factories.len() == 1 {
+        println!("You only have one factory.");
+        wait_for_enter();
+        return;
+    }
+
+    println!("Available factories:");
+    for (idx, factory) in game.player.factories.iter().enumerate() {
+        let current_marker = if Some(idx) == game.current_factory {
+            " (current)"
+        } else {
+            ""
+        };
+        println!("  [{}] {}{}", idx + 1, factory.name, current_marker);
+    }
+
+    let factory_num = match read_number("Enter factory number (0 to cancel): ") {
+        Some(0) => return,
+        Some(n) if n > 0 && (n as usize) <= game.player.factories.len() => n as usize - 1,
+        _ => {
+            println!("Invalid factory number.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    if game.switch_factory(factory_num).is_ok() {
+        println!("Switched to: {}", game.player.factories[factory_num].name);
+    }
+    wait_for_enter();
+}
+
+/// Handles buying a new factory
+fn handle_buy_new_factory(game: &mut GameState) {
+    println!("Buy a new factory for $10,000");
+    println!("Your cash: ${:.2}", game.player.cash);
+    println!();
+
+    if game.player.cash < 10000.0 {
+        println!("Not enough cash! You need $10,000.");
+        wait_for_enter();
+        return;
+    }
+
+    let name = read_input("Enter name for new factory (0 to cancel): ");
+    if name == "0" || name.is_empty() {
+        return;
+    }
+
+    match game.buy_new_factory(&name) {
+        Ok(()) => {
+            println!();
+            println!("SUCCESS! Purchased new factory: {}", name);
+            println!("Remaining cash: ${:.2}", game.player.cash);
         }
         Err(e) => {
             println!("ERROR: {}", e);

@@ -1,6 +1,8 @@
 pub mod economy;
+pub mod factory;
 pub mod game;
 pub mod player;
 pub mod product;
+pub mod recipe;
 pub mod store;
 pub mod ui;

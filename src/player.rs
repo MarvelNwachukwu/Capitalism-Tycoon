@@ -1,3 +1,4 @@
+use crate::factory::Factory;
 use crate::store::Store;
 
 /// Represents the player in the game
@@ -5,7 +6,9 @@ use crate::store::Store;
 pub struct Player {
     pub cash: f64,
     pub stores: Vec<Store>,
+    pub factories: Vec<Factory>,
     next_store_id: u32,
+    next_factory_id: u32,
 }
 
 impl Player {
@@ -14,7 +17,9 @@ impl Player {
         Player {
             cash: starting_cash,
             stores: vec![Store::new(1, store_name)],
+            factories: Vec::new(),
             next_store_id: 2,
+            next_factory_id: 1,
         }
     }
 
@@ -45,6 +50,23 @@ impl Player {
         self.next_store_id += 1;
     }
 
+    /// Gets a reference to a factory by index
+    pub fn factory_at(&self, index: usize) -> &Factory {
+        &self.factories[index]
+    }
+
+    /// Gets a mutable reference to a factory by index
+    pub fn factory_at_mut(&mut self, index: usize) -> &mut Factory {
+        &mut self.factories[index]
+    }
+
+    /// Adds a new factory to the player's portfolio
+    pub fn add_factory(&mut self, name: &str) {
+        let factory = Factory::new(self.next_factory_id, name);
+        self.factories.push(factory);
+        self.next_factory_id += 1;
+    }
+
     /// Spends money if the player has enough
     pub fn spend(&mut self, amount: f64) -> bool {
         if self.cash >= amount {
@@ -66,8 +88,10 @@ impl Player {
         self.cash + inventory_value
     }
 
-    /// Returns the total daily expenses across all stores
+    /// Returns the total daily expenses across all stores and factories
     pub fn total_daily_expenses(&self) -> f64 {
-        self.stores.iter().map(|s| s.daily_expenses()).sum()
+        let store_expenses: f64 = self.stores.iter().map(|s| s.daily_expenses()).sum();
+        let factory_expenses: f64 = self.factories.iter().map(|f| f.daily_expenses()).sum();
+        store_expenses + factory_expenses
     }
 }
