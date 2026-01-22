@@ -57,6 +57,10 @@ pub struct Factory {
     pub production_queue: Vec<ProductionJob>,
     pub workers: Vec<FactoryWorker>,
     pub daily_rent: f64,
+    /// Store IDs this factory is connected to (supply chain)
+    pub connected_stores: Vec<u32>,
+    /// If true, auto-transfer finished goods to connected stores
+    pub auto_transfer: bool,
 }
 
 impl Factory {
@@ -70,6 +74,8 @@ impl Factory {
             production_queue: Vec::new(),
             workers: Vec::new(),
             daily_rent: 150.0, // $150/day
+            connected_stores: Vec::new(),
+            auto_transfer: false,
         }
     }
 
@@ -277,5 +283,39 @@ impl Factory {
         }
 
         Ok(actual_quantity)
+    }
+
+    // ==================== SUPPLY CHAIN METHODS ====================
+
+    /// Connects this factory to a store (establishes supply chain)
+    pub fn connect_store(&mut self, store_id: u32) {
+        if !self.connected_stores.contains(&store_id) {
+            self.connected_stores.push(store_id);
+        }
+    }
+
+    /// Disconnects this factory from a store
+    pub fn disconnect_store(&mut self, store_id: u32) {
+        self.connected_stores.retain(|&id| id != store_id);
+    }
+
+    /// Checks if this factory is connected to a specific store
+    pub fn is_connected_to(&self, store_id: u32) -> bool {
+        self.connected_stores.contains(&store_id)
+    }
+
+    /// Returns true if factory has any supply chain connections
+    pub fn has_connections(&self) -> bool {
+        !self.connected_stores.is_empty()
+    }
+
+    /// Toggles auto-transfer setting
+    pub fn toggle_auto_transfer(&mut self) {
+        self.auto_transfer = !self.auto_transfer;
+    }
+
+    /// Gets the first connected store ID (for auto-transfer)
+    pub fn primary_store(&self) -> Option<u32> {
+        self.connected_stores.first().copied()
     }
 }

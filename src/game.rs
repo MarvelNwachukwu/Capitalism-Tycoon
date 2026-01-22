@@ -28,14 +28,17 @@ pub struct DayResult {
     pub expenses_by_factory: Vec<(String, f64, f64)>, // (factory_name, rent, salaries)
     pub production_completed: Vec<ProductionResult>,
     pub net_profit: f64,
-    // New loan-related fields
+    // Economic state fields
     pub economic_state: EconomicState,
     pub economic_change: Option<String>,       // "Economy improved to Growth!"
+    // Loan fields
     pub loan_interest_accrued: f64,            // Total interest accrued today
     pub loan_payments: Vec<(u32, f64)>,        // (loan_id, amount_paid) - auto-payments
     pub loans_due: Vec<(u32, f64)>,            // Term loans that came due (id, amount)
     pub loans_due_soon: Vec<(u32, u32, f64)>,  // Warnings: (loan_id, days_remaining, balance)
     pub term_loan_penalties: f64,              // Penalties for defaulted term loans
+    // Supply chain auto-transfers: (factory_name, store_name, product_name, quantity)
+    pub auto_transfers: Vec<(String, String, String, u32)>,
 }
 
 impl GameState {
@@ -214,6 +217,7 @@ impl GameState {
     }
 
     /// Transfers finished goods from factory to store
+    /// Requires the factory to be connected to the store (supply chain)
     pub fn transfer_to_store(
         &mut self,
         product_id: u32,
@@ -226,6 +230,15 @@ impl GameState {
 
         if store_idx >= self.player.stores.len() {
             return Err("Invalid store index".to_string());
+        }
+
+        // Check supply chain connection
+        let store_id = self.player.stores[store_idx].id;
+        if !self.player.factories[factory_idx].is_connected_to(store_id) {
+            return Err(format!(
+                "Factory is not connected to {}. Set up supply chain first!",
+                self.player.stores[store_idx].name
+            ));
         }
 
         // Get product info for retail price
@@ -243,6 +256,60 @@ impl GameState {
         self.player.stores[store_idx].add_inventory(product_id, actual_quantity, retail_price);
 
         Ok(actual_quantity)
+    }
+
+    // ==================== SUPPLY CHAIN METHODS ====================
+
+    /// Connects the current factory to a store
+    pub fn connect_factory_to_store(&mut self, store_idx: usize) -> Result<(), String> {
+        let factory_idx = self
+            .current_factory
+            .ok_or("No factory selected")?;
+
+        if store_idx >= self.player.stores.len() {
+            return Err("Invalid store index".to_string());
+        }
+
+        let store_id = self.player.stores[store_idx].id;
+        self.player.factories[factory_idx].connect_store(store_id);
+        Ok(())
+    }
+
+    /// Disconnects the current factory from a store
+    pub fn disconnect_factory_from_store(&mut self, store_idx: usize) -> Result<(), String> {
+        let factory_idx = self
+            .current_factory
+            .ok_or("No factory selected")?;
+
+        if store_idx >= self.player.stores.len() {
+            return Err("Invalid store index".to_string());
+        }
+
+        let store_id = self.player.stores[store_idx].id;
+        self.player.factories[factory_idx].disconnect_store(store_id);
+        Ok(())
+    }
+
+    /// Toggles auto-transfer for the current factory
+    pub fn toggle_factory_auto_transfer(&mut self) -> Result<bool, String> {
+        let factory_idx = self
+            .current_factory
+            .ok_or("No factory selected")?;
+
+        self.player.factories[factory_idx].toggle_auto_transfer();
+        Ok(self.player.factories[factory_idx].auto_transfer)
+    }
+
+    /// Gets store index by store ID
+    pub fn get_store_index_by_id(&self, store_id: u32) -> Option<usize> {
+        self.player.stores.iter().position(|s| s.id == store_id)
+    }
+
+    /// Gets store name by ID
+    pub fn get_store_name_by_id(&self, store_id: u32) -> Option<&str> {
+        self.player.stores.iter()
+            .find(|s| s.id == store_id)
+            .map(|s| s.name.as_str())
     }
 
     /// Calculates total daily expenses across all stores and factories
@@ -462,6 +529,8 @@ impl GameState {
 
         // Process each factory
         let factory_count = self.player.factories.len();
+        let mut auto_transfers: Vec<(String, String, String, u32)> = Vec::new();
+
         for factory_idx in 0..factory_count {
             // Calculate expenses for this factory
             let factory = &self.player.factories[factory_idx];
@@ -470,11 +539,55 @@ impl GameState {
             let factory_name = factory.name.clone();
             let factory_expenses = rent + salaries;
             total_expenses += factory_expenses;
-            expenses_by_factory.push((factory_name, rent, salaries));
+            expenses_by_factory.push((factory_name.clone(), rent, salaries));
 
             // Advance production and collect completed items
             let completed = self.player.factories[factory_idx].advance_production();
             production_completed.extend(completed);
+
+            // Process auto-transfers if enabled
+            let factory = &self.player.factories[factory_idx];
+            if factory.auto_transfer && !factory.connected_stores.is_empty() {
+                // Get primary store for auto-transfer
+                if let Some(primary_store_id) = factory.primary_store() {
+                    // Find store index
+                    if let Some(store_idx) = self.player.stores.iter().position(|s| s.id == primary_store_id) {
+                        let store_name = self.player.stores[store_idx].name.clone();
+
+                        // Transfer all finished goods
+                        let product_ids: Vec<u32> = self.player.factories[factory_idx]
+                            .finished_goods
+                            .keys()
+                            .copied()
+                            .collect();
+
+                        for product_id in product_ids {
+                            let quantity = self.player.factories[factory_idx].get_finished_good(product_id);
+                            if quantity > 0 {
+                                // Get product info for retail price
+                                if let Some(product) = self.get_product(product_id) {
+                                    let product_name = product.name.clone();
+                                    let retail_price = Market::suggest_retail_price(product.base_price, 50.0);
+
+                                    // Take from factory and add to store
+                                    if let Ok(transferred) = self.player.factories[factory_idx]
+                                        .take_finished_goods(product_id, quantity)
+                                    {
+                                        self.player.stores[store_idx]
+                                            .add_inventory(product_id, transferred, retail_price);
+                                        auto_transfers.push((
+                                            factory_name.clone(),
+                                            store_name.clone(),
+                                            product_name,
+                                            transferred,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Deduct expenses
@@ -587,6 +700,7 @@ impl GameState {
             loans_due,
             loans_due_soon,
             term_loan_penalties,
+            auto_transfers,
         }
     }
 }

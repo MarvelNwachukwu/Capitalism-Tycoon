@@ -611,6 +611,18 @@ pub fn display_day_result(result: &DayResult, new_day: u32, game: &GameState) {
         }
     }
 
+    // Auto-transfers section
+    if !result.auto_transfers.is_empty() {
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║  AUTO-TRANSFERS (Supply Chain):                              ║");
+        for (factory, store, product, qty) in &result.auto_transfers {
+            println!(
+                "║    {} -> {}: {} x {}           ║",
+                factory, store, qty, product
+            );
+        }
+    }
+
     // Net profit section
     println!("╠══════════════════════════════════════════════════════════════╣");
     let profit_label = if result.net_profit >= 0.0 {
@@ -1048,8 +1060,9 @@ pub fn handle_manage_factories(game: &mut GameState) {
         println!("║  [3] Start production                                        ║");
         println!("║  [4] Transfer goods to store                                 ║");
         println!("║  [5] Manage factory workers                                  ║");
-        println!("║  [6] Switch factory                                          ║");
-        println!("║  [7] Buy new factory ($10,000)                               ║");
+        println!("║  [6] Manage supply chain                                     ║");
+        println!("║  [7] Switch factory                                          ║");
+        println!("║  [8] Buy new factory ($10,000)                               ║");
         println!("║  [0] Back to main menu                                       ║");
         println!("╚══════════════════════════════════════════════════════════════╝");
         println!();
@@ -1062,8 +1075,9 @@ pub fn handle_manage_factories(game: &mut GameState) {
             "3" => handle_start_production(game),
             "4" => handle_transfer_goods(game),
             "5" => handle_factory_workers(game),
-            "6" => handle_switch_factory(game),
-            "7" => handle_buy_new_factory(game),
+            "6" => handle_supply_chain(game),
+            "7" => handle_switch_factory(game),
+            "8" => handle_buy_new_factory(game),
             _ => println!("Invalid choice."),
         }
     }
@@ -1148,6 +1162,24 @@ fn display_factory_status(game: &GameState) {
                     .map(|p| p.name.as_str())
                     .unwrap_or("Unknown");
                 println!("║    {:30} x {:>6}                   ║", name, quantity);
+            }
+        }
+    }
+
+    // Supply chain
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!(
+        "║  SUPPLY CHAIN: Auto-transfer {}                              ║",
+        if factory.auto_transfer { "ON " } else { "OFF" }
+    );
+    if factory.connected_stores.is_empty() {
+        println!("║    (Not connected to any stores)                             ║");
+    } else {
+        for store_id in &factory.connected_stores {
+            if let Some(store_name) = game.get_store_name_by_id(*store_id) {
+                let is_primary = factory.primary_store() == Some(*store_id);
+                let marker = if is_primary { " [PRIMARY]" } else { "" };
+                println!("║    → {}{}                                    ║", store_name, marker);
             }
         }
     }
@@ -1590,12 +1622,23 @@ fn handle_transfer_goods(game: &mut GameState) {
     }
 
     println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  Your stores:                                                ║");
+    println!("║  Your stores (must be connected via supply chain):           ║");
+    let factory = game.current_factory().unwrap();
     for (idx, store) in game.player.stores.iter().enumerate() {
-        println!("║    [{}] {:40}       ║", idx + 1, store.name);
+        let connected = factory.is_connected_to(store.id);
+        let status = if connected { "[OK]" } else { "[NOT CONNECTED]" };
+        println!("║    [{}] {:30} {}       ║", idx + 1, store.name, status);
     }
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
+
+    // Check if factory has any connections
+    if factory.connected_stores.is_empty() {
+        println!("This factory is not connected to any stores!");
+        println!("Go to 'Manage supply chain' to connect stores first.");
+        wait_for_enter();
+        return;
+    }
 
     let product_id = match read_number("Enter product ID to transfer (0 to cancel): ") {
         Some(0) => return,
@@ -1848,6 +1891,161 @@ fn handle_buy_new_factory(game: &mut GameState) {
         }
     }
     wait_for_enter();
+}
+
+// ==================== SUPPLY CHAIN MANAGEMENT ====================
+
+/// Handles supply chain management for the current factory
+fn handle_supply_chain(game: &mut GameState) {
+    if game.current_factory.is_none() {
+        println!("No factory selected. Buy or select a factory first!");
+        wait_for_enter();
+        return;
+    }
+
+    loop {
+        clear_screen();
+        let factory = game.current_factory().unwrap();
+
+        println!("╔══════════════════════════════════════════════════════════════╗");
+        println!("║                    SUPPLY CHAIN                              ║");
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!(
+            "║  Factory: {:40}       ║",
+            factory.name
+        );
+        println!(
+            "║  Auto-transfer: {:6}                                        ║",
+            if factory.auto_transfer { "ON" } else { "OFF" }
+        );
+        println!("╠══════════════════════════════════════════════════════════════╣");
+
+        // Show connected stores
+        println!("║  Connected Stores:                                           ║");
+        if factory.connected_stores.is_empty() {
+            println!("║    (None - connect stores to enable transfers)               ║");
+        } else {
+            for store_id in &factory.connected_stores {
+                if let Some(store_name) = game.get_store_name_by_id(*store_id) {
+                    let is_primary = factory.primary_store() == Some(*store_id);
+                    let marker = if is_primary { " [PRIMARY]" } else { "" };
+                    println!("║    - {}{}                                     ║", store_name, marker);
+                }
+            }
+        }
+
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║  Available Stores:                                           ║");
+
+        let factory = game.current_factory().unwrap();
+        for (idx, store) in game.player.stores.iter().enumerate() {
+            let connected = factory.is_connected_to(store.id);
+            let status = if connected { "[CONNECTED]" } else { "" };
+            println!(
+                "║    [{}] {:30} {}           ║",
+                idx + 1,
+                store.name,
+                status
+            );
+        }
+
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║  [1] Connect store                                           ║");
+        println!("║  [2] Disconnect store                                        ║");
+        println!("║  [3] Toggle auto-transfer                                    ║");
+        println!("║  [0] Back                                                    ║");
+        println!("╚══════════════════════════════════════════════════════════════╝");
+        println!();
+
+        if factory.auto_transfer && !factory.connected_stores.is_empty() {
+            println!("Auto-transfer is ON: Finished goods will automatically ship");
+            println!("to the primary connected store each day.");
+            println!();
+        }
+
+        let input = read_input("Enter choice: ");
+        match input.trim() {
+            "0" => return,
+            "1" => {
+                // Connect store
+                let store_num = match read_number("Enter store number to connect (0 to cancel): ") {
+                    Some(0) => continue,
+                    Some(n) if n > 0 && (n as usize) <= game.player.stores.len() => n as usize - 1,
+                    _ => {
+                        println!("Invalid store number.");
+                        wait_for_enter();
+                        continue;
+                    }
+                };
+
+                let store_name = game.player.stores[store_num].name.clone();
+                match game.connect_factory_to_store(store_num) {
+                    Ok(()) => {
+                        println!("Connected to {}!", store_name);
+                    }
+                    Err(e) => {
+                        println!("ERROR: {}", e);
+                    }
+                }
+                wait_for_enter();
+            }
+            "2" => {
+                // Disconnect store
+                let factory = game.current_factory().unwrap();
+                if factory.connected_stores.is_empty() {
+                    println!("No stores connected.");
+                    wait_for_enter();
+                    continue;
+                }
+
+                let store_num = match read_number("Enter store number to disconnect (0 to cancel): ") {
+                    Some(0) => continue,
+                    Some(n) if n > 0 && (n as usize) <= game.player.stores.len() => n as usize - 1,
+                    _ => {
+                        println!("Invalid store number.");
+                        wait_for_enter();
+                        continue;
+                    }
+                };
+
+                let store_name = game.player.stores[store_num].name.clone();
+                match game.disconnect_factory_from_store(store_num) {
+                    Ok(()) => {
+                        println!("Disconnected from {}.", store_name);
+                    }
+                    Err(e) => {
+                        println!("ERROR: {}", e);
+                    }
+                }
+                wait_for_enter();
+            }
+            "3" => {
+                // Toggle auto-transfer
+                let factory = game.current_factory().unwrap();
+                if factory.connected_stores.is_empty() {
+                    println!("Connect at least one store before enabling auto-transfer!");
+                    wait_for_enter();
+                    continue;
+                }
+
+                match game.toggle_factory_auto_transfer() {
+                    Ok(enabled) => {
+                        if enabled {
+                            println!("Auto-transfer ENABLED!");
+                            println!("Finished goods will automatically ship to the primary store.");
+                        } else {
+                            println!("Auto-transfer DISABLED.");
+                        }
+                    }
+                    Err(e) => {
+                        println!("ERROR: {}", e);
+                    }
+                }
+                wait_for_enter();
+            }
+            _ => println!("Invalid choice."),
+        }
+    }
 }
 
 // ==================== LOAN MANAGEMENT ====================
