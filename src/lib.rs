@@ -1,3 +1,4 @@
+pub mod competitor;
 pub mod economy;
 pub mod factory;
 pub mod game;

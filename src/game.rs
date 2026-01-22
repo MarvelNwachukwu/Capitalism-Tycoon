@@ -1,3 +1,4 @@
+use crate::competitor::CompetitiveMarket;
 use crate::economy::{EconomicState, Market};
 use crate::factory::ProductionResult;
 use crate::loan::{Loan, LoanType};
@@ -10,6 +11,7 @@ pub struct GameState {
     pub day: u32,
     pub player: Player,
     pub market: Market,
+    pub competitive_market: CompetitiveMarket,
     pub products: Vec<Product>,
     pub recipes: Vec<Recipe>,
     pub current_store: usize,
@@ -39,6 +41,9 @@ pub struct DayResult {
     pub term_loan_penalties: f64,              // Penalties for defaulted term loans
     // Supply chain auto-transfers: (factory_name, store_name, product_name, quantity)
     pub auto_transfers: Vec<(String, String, String, u32)>,
+    // Competitor events
+    pub competitor_events: Vec<String>,
+    pub player_market_share: f64,
 }
 
 impl GameState {
@@ -48,11 +53,13 @@ impl GameState {
         let market = Market::new(&products);
         let player = Player::new(1000.0, "My First Store");
         let recipes = Recipe::default_recipes();
+        let competitive_market = CompetitiveMarket::new();
 
         GameState {
             day: 1,
             player,
             market,
+            competitive_market,
             products,
             recipes,
             current_store: 0,
@@ -81,7 +88,8 @@ impl GameState {
     }
 
     /// Buys a new store
-    pub fn buy_new_store(&mut self, name: &str) -> Result<(), String> {
+    /// Returns competitor reactions to the expansion
+    pub fn buy_new_store(&mut self, name: &str) -> Result<Vec<String>, String> {
         const NEW_STORE_COST: f64 = 5000.0;
 
         if self.player.cash < NEW_STORE_COST {
@@ -93,7 +101,10 @@ impl GameState {
 
         self.player.spend(NEW_STORE_COST);
         self.player.add_store(name);
-        Ok(())
+
+        // Notify competitors and get their reactions
+        let reactions = self.competitive_market.notify_player_expansion();
+        Ok(reactions)
     }
 
     // ==================== FACTORY METHODS ====================
@@ -457,6 +468,18 @@ impl GameState {
         let economic_change = self.market.advance_day(self.day);
         let economic_state = self.market.economic_state;
 
+        // Calculate player's average markup for market share calculation
+        let player_avg_markup = self.calculate_average_markup();
+        let player_store_count = self.player.stores.len() as u32;
+
+        // Update market shares based on player and competitor positions
+        self.competitive_market.calculate_market_shares(player_store_count, player_avg_markup);
+        let player_market_share = self.competitive_market.player_market_share;
+        let customer_multiplier = self.competitive_market.player_customer_multiplier();
+
+        // Process competitor actions
+        let competitor_events = self.competitive_market.advance_day(economic_state.sales_multiplier());
+
         let mut total_revenue = 0.0;
         let mut total_items_sold = 0;
         let mut sales_by_product = Vec::new();
@@ -484,8 +507,9 @@ impl GameState {
             total_expenses += store_expenses;
             expenses_by_store.push((store_name, rent, salaries));
 
-            // Get customer count with employee bonus
-            let customer_count = self.player.stores[store_idx].effective_customers();
+            // Get customer count with employee bonus and market share multiplier
+            let base_customers = self.player.stores[store_idx].effective_customers();
+            let customer_count = (base_customers as f64 * customer_multiplier) as u32;
 
             // Clone inventory keys to avoid borrow issues
             let product_ids: Vec<u32> = self.player.stores[store_idx]
@@ -701,6 +725,30 @@ impl GameState {
             loans_due_soon,
             term_loan_penalties,
             auto_transfers,
+            competitor_events,
+            player_market_share,
+        }
+    }
+
+    /// Calculates average markup across all stores
+    fn calculate_average_markup(&self) -> f64 {
+        let mut total_markup = 0.0;
+        let mut item_count = 0;
+
+        for store in &self.player.stores {
+            for (product_id, item) in &store.inventory {
+                if let Some(product) = self.get_product(*product_id) {
+                    let markup = ((item.retail_price - product.base_price) / product.base_price) * 100.0;
+                    total_markup += markup;
+                    item_count += 1;
+                }
+            }
+        }
+
+        if item_count > 0 {
+            total_markup / item_count as f64
+        } else {
+            50.0 // Default markup if no inventory
         }
     }
 }

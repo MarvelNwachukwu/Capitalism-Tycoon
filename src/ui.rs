@@ -30,6 +30,7 @@ pub fn display_header(game: &GameState) {
     let daily_expenses = game.total_daily_expenses();
     let economic_state = &game.market.economic_state;
     let total_debt = game.player.total_debt();
+    let market_share = game.competitive_market.player_market_share * 100.0;
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║              BUSINESS TYCOON - Rust Edition                  ║");
@@ -46,9 +47,14 @@ pub fn display_header(game: &GameState) {
         daily_expenses
     );
     println!(
-        "║  Economy: {:12} │  Total Debt: ${:>12.2}       ║",
+        "║  Economy: {:12} │  Market Share: {:>5.1}%             ║",
         economic_state.name(),
-        total_debt
+        market_share
+    );
+    println!(
+        "║  Debt: ${:>10.2}    │  Competitors: {:>2} stores            ║",
+        total_debt,
+        game.competitive_market.total_competitor_stores()
     );
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
@@ -623,6 +629,21 @@ pub fn display_day_result(result: &DayResult, new_day: u32, game: &GameState) {
         }
     }
 
+    // Market & Competitors section
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!(
+        "║  MARKET: Your share: {:>5.1}%                                  ║",
+        result.player_market_share * 100.0
+    );
+
+    // Competitor events
+    if !result.competitor_events.is_empty() {
+        println!("║  COMPETITOR NEWS:                                            ║");
+        for event in &result.competitor_events {
+            println!("║    >>> {}                    ║", event);
+        }
+    }
+
     // Net profit section
     println!("╠══════════════════════════════════════════════════════════════╣");
     let profit_label = if result.net_profit >= 0.0 {
@@ -829,10 +850,18 @@ fn handle_buy_new_store(game: &mut GameState) {
     }
 
     match game.buy_new_store(&name) {
-        Ok(()) => {
+        Ok(reactions) => {
             println!();
             println!("SUCCESS! Purchased new store: {}", name);
             println!("Remaining cash: ${:.2}", game.player.cash);
+            // Show competitor reactions
+            if !reactions.is_empty() {
+                println!();
+                println!("COMPETITOR REACTIONS:");
+                for reaction in reactions {
+                    println!("  >>> {}", reaction);
+                }
+            }
         }
         Err(e) => {
             println!("ERROR: {}", e);
