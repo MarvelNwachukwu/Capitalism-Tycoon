@@ -6,5 +6,6 @@ pub mod loan;
 pub mod player;
 pub mod product;
 pub mod recipe;
+pub mod stock;
 pub mod store;
 pub mod ui;

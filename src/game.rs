@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::competitor::CompetitiveMarket;
 use crate::economy::{EconomicState, Market};
 use crate::factory::ProductionResult;
@@ -5,6 +6,7 @@ use crate::loan::{Loan, LoanType};
 use crate::player::Player;
 use crate::product::Product;
 use crate::recipe::Recipe;
+use crate::stock::StockMarket;
 
 /// Represents the complete game state
 pub struct GameState {
@@ -12,6 +14,7 @@ pub struct GameState {
     pub player: Player,
     pub market: Market,
     pub competitive_market: CompetitiveMarket,
+    pub stock_market: StockMarket,
     pub products: Vec<Product>,
     pub recipes: Vec<Recipe>,
     pub current_store: usize,
@@ -44,6 +47,9 @@ pub struct DayResult {
     // Competitor events
     pub competitor_events: Vec<String>,
     pub player_market_share: f64,
+    // Stock market events
+    pub stock_changes: Vec<(String, f64, f64)>,  // (symbol, old_price, new_price)
+    pub dividends_earned: f64,
 }
 
 impl GameState {
@@ -54,12 +60,14 @@ impl GameState {
         let player = Player::new(1000.0, "My First Store");
         let recipes = Recipe::default_recipes();
         let competitive_market = CompetitiveMarket::new();
+        let stock_market = StockMarket::new();
 
         GameState {
             day: 1,
             player,
             market,
             competitive_market,
+            stock_market,
             products,
             recipes,
             current_store: 0,
@@ -699,6 +707,28 @@ impl GameState {
         // 6. Clean up paid-off loans
         self.player.cleanup_loans();
 
+        // ==================== STOCK MARKET PROCESSING ====================
+
+        // Update stock prices
+        let stock_price_changes = self.stock_market.advance_day(&economic_state);
+        let stock_changes: Vec<(String, f64, f64)> = stock_price_changes
+            .iter()
+            .map(|(sym, old, new, _)| (sym.clone(), *old, *new))
+            .collect();
+
+        // Process dividends for player's holdings
+        let mut dividends_earned = 0.0;
+        for stock in &self.stock_market.stocks {
+            if let Some(holding) = self.player.get_holding_mut(stock.id) {
+                let dividend = stock.daily_dividend() * holding.shares as f64;
+                if dividend > 0.0 {
+                    dividends_earned += dividend;
+                    holding.receive_dividend(dividend);
+                }
+            }
+        }
+        self.player.cash += dividends_earned;
+
         // Check for bankruptcy
         if self.player.cash < 0.0 {
             self.is_bankrupt = true;
@@ -706,7 +736,7 @@ impl GameState {
 
         self.day += 1;
 
-        let net_profit = total_revenue - total_expenses - loan_interest_accrued;
+        let net_profit = total_revenue - total_expenses - loan_interest_accrued + dividends_earned;
 
         DayResult {
             total_revenue,
@@ -727,6 +757,8 @@ impl GameState {
             auto_transfers,
             competitor_events,
             player_market_share,
+            stock_changes,
+            dividends_earned,
         }
     }
 
@@ -750,6 +782,46 @@ impl GameState {
         } else {
             50.0 // Default markup if no inventory
         }
+    }
+
+    // ==================== STOCK MARKET METHODS ====================
+
+    /// Buys shares of a stock
+    pub fn buy_stock(&mut self, stock_id: u32, shares: u32) -> Result<f64, String> {
+        let price = self.stock_market.get_stock(stock_id)
+            .ok_or("Stock not found")?
+            .price;
+
+        self.player.buy_stock(stock_id, shares, price)?;
+        Ok(price * shares as f64)
+    }
+
+    /// Sells shares of a stock
+    pub fn sell_stock(&mut self, stock_id: u32, shares: u32) -> Result<f64, String> {
+        let price = self.stock_market.get_stock(stock_id)
+            .ok_or("Stock not found")?
+            .price;
+
+        self.player.sell_stock(stock_id, shares, price)
+    }
+
+    /// Gets current stock prices as a HashMap for portfolio calculations
+    pub fn get_stock_prices(&self) -> HashMap<u32, f64> {
+        self.stock_market.stocks.iter()
+            .map(|s| (s.id, s.price))
+            .collect()
+    }
+
+    /// Gets player's portfolio value at current prices
+    pub fn portfolio_value(&self) -> f64 {
+        let prices = self.get_stock_prices();
+        self.player.portfolio_value(&prices)
+    }
+
+    /// Gets player's portfolio gain/loss at current prices
+    pub fn portfolio_gain_loss(&self) -> f64 {
+        let prices = self.get_stock_prices();
+        self.player.portfolio_gain_loss(&prices)
     }
 }
 

@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use crate::factory::Factory;
 use crate::loan::Loan;
+use crate::stock::StockHolding;
 use crate::store::Store;
 
 /// Represents the player in the game
@@ -9,6 +11,8 @@ pub struct Player {
     pub stores: Vec<Store>,
     pub factories: Vec<Factory>,
     pub loans: Vec<Loan>,
+    /// Stock portfolio: stock_id -> holding
+    pub portfolio: HashMap<u32, StockHolding>,
     next_store_id: u32,
     next_factory_id: u32,
     next_loan_id: u32,
@@ -22,6 +26,7 @@ impl Player {
             stores: vec![Store::new(1, store_name)],
             factories: Vec::new(),
             loans: Vec::new(),
+            portfolio: HashMap::new(),
             next_store_id: 2,
             next_factory_id: 1,
             next_loan_id: 1,
@@ -87,10 +92,21 @@ impl Player {
         self.cash += amount;
     }
 
-    /// Returns the player's total net worth (cash + inventory value - debt)
+    /// Returns the player's total net worth (cash + inventory value + portfolio cost basis - debt)
+    /// Note: For accurate net worth with current prices, use net_worth_with_stocks
     pub fn net_worth(&self) -> f64 {
         let inventory_value: f64 = self.stores.iter().map(|s| s.total_inventory_value()).sum();
-        self.cash + inventory_value - self.total_debt()
+        let portfolio_cost: f64 = self.portfolio.values()
+            .map(|h| h.avg_purchase_price * h.shares as f64)
+            .sum();
+        self.cash + inventory_value + portfolio_cost - self.total_debt()
+    }
+
+    /// Returns net worth including current stock market values
+    pub fn net_worth_with_stocks(&self, stock_prices: &HashMap<u32, f64>) -> f64 {
+        let inventory_value: f64 = self.stores.iter().map(|s| s.total_inventory_value()).sum();
+        let portfolio_value = self.portfolio_value(stock_prices);
+        self.cash + inventory_value + portfolio_value - self.total_debt()
     }
 
     /// Returns the total daily expenses across all stores and factories
@@ -162,5 +178,83 @@ impl Player {
     /// Returns the next loan ID without incrementing
     pub fn peek_next_loan_id(&self) -> u32 {
         self.next_loan_id
+    }
+
+    // ==================== STOCK PORTFOLIO METHODS ====================
+
+    /// Buys shares of a stock
+    pub fn buy_stock(&mut self, stock_id: u32, shares: u32, price: f64) -> Result<(), String> {
+        let total_cost = price * shares as f64;
+        if total_cost > self.cash {
+            return Err(format!(
+                "Not enough cash! Need ${:.2}, have ${:.2}",
+                total_cost, self.cash
+            ));
+        }
+
+        self.cash -= total_cost;
+
+        if let Some(holding) = self.portfolio.get_mut(&stock_id) {
+            holding.add_shares(shares, price);
+        } else {
+            self.portfolio.insert(stock_id, StockHolding::new(stock_id, shares, price));
+        }
+
+        Ok(())
+    }
+
+    /// Sells shares of a stock
+    pub fn sell_stock(&mut self, stock_id: u32, shares: u32, price: f64) -> Result<f64, String> {
+        let holding = self.portfolio.get_mut(&stock_id)
+            .ok_or("You don't own this stock")?;
+
+        if shares > holding.shares {
+            return Err(format!(
+                "Not enough shares! You have {}, trying to sell {}",
+                holding.shares, shares
+            ));
+        }
+
+        holding.remove_shares(shares);
+        let proceeds = price * shares as f64;
+        self.cash += proceeds;
+
+        // Remove holding if no shares left
+        if holding.shares == 0 {
+            self.portfolio.remove(&stock_id);
+        }
+
+        Ok(proceeds)
+    }
+
+    /// Gets the holding for a specific stock
+    pub fn get_holding(&self, stock_id: u32) -> Option<&StockHolding> {
+        self.portfolio.get(&stock_id)
+    }
+
+    /// Gets mutable holding for a specific stock
+    pub fn get_holding_mut(&mut self, stock_id: u32) -> Option<&mut StockHolding> {
+        self.portfolio.get_mut(&stock_id)
+    }
+
+    /// Returns total portfolio value at given stock prices
+    pub fn portfolio_value(&self, stock_prices: &HashMap<u32, f64>) -> f64 {
+        self.portfolio.iter().map(|(stock_id, holding)| {
+            let price = stock_prices.get(stock_id).unwrap_or(&0.0);
+            holding.current_value(*price)
+        }).sum()
+    }
+
+    /// Returns total unrealized gain/loss
+    pub fn portfolio_gain_loss(&self, stock_prices: &HashMap<u32, f64>) -> f64 {
+        self.portfolio.iter().map(|(stock_id, holding)| {
+            let price = stock_prices.get(stock_id).unwrap_or(&0.0);
+            holding.gain_loss(*price)
+        }).sum()
+    }
+
+    /// Returns total dividends earned across all holdings
+    pub fn total_dividends_earned(&self) -> f64 {
+        self.portfolio.values().map(|h| h.total_dividends_earned).sum()
     }
 }

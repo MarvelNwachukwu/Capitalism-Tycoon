@@ -15,6 +15,7 @@ pub enum MenuChoice {
     ManageStaff,
     ManageFactories,
     ManageLoans,
+    ManageInvestments,
     Quit,
 }
 
@@ -31,6 +32,7 @@ pub fn display_header(game: &GameState) {
     let economic_state = &game.market.economic_state;
     let total_debt = game.player.total_debt();
     let market_share = game.competitive_market.player_market_share * 100.0;
+    let portfolio_value = game.portfolio_value();
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║              BUSINESS TYCOON - Rust Edition                  ║");
@@ -52,9 +54,9 @@ pub fn display_header(game: &GameState) {
         market_share
     );
     println!(
-        "║  Debt: ${:>10.2}    │  Competitors: {:>2} stores            ║",
+        "║  Debt: ${:>10.2}    │  Portfolio: ${:>10.2}          ║",
         total_debt,
-        game.competitive_market.total_competitor_stores()
+        portfolio_value
     );
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
@@ -71,11 +73,12 @@ pub fn display_menu() -> MenuChoice {
     println!("  [6] Manage staff");
     println!("  [7] Manage factories");
     println!("  [8] Manage loans");
-    println!("  [9] Quit game");
+    println!("  [9] Manage investments");
+    println!("  [0] Quit game");
     println!();
 
     loop {
-        let input = read_input("Enter choice (1-9): ");
+        let input = read_input("Enter choice (0-9): ");
         match input.trim() {
             "1" => return MenuChoice::ViewStore,
             "2" => return MenuChoice::BuyInventory,
@@ -85,8 +88,9 @@ pub fn display_menu() -> MenuChoice {
             "6" => return MenuChoice::ManageStaff,
             "7" => return MenuChoice::ManageFactories,
             "8" => return MenuChoice::ManageLoans,
-            "9" => return MenuChoice::Quit,
-            _ => println!("Invalid choice. Please enter 1-9."),
+            "9" => return MenuChoice::ManageInvestments,
+            "0" => return MenuChoice::Quit,
+            _ => println!("Invalid choice. Please enter 0-9."),
         }
     }
 }
@@ -641,6 +645,36 @@ pub fn display_day_result(result: &DayResult, new_day: u32, game: &GameState) {
         println!("║  COMPETITOR NEWS:                                            ║");
         for event in &result.competitor_events {
             println!("║    >>> {}                    ║", event);
+        }
+    }
+
+    // Stock market section (if player has holdings or significant price moves)
+    let significant_moves: Vec<_> = result.stock_changes.iter()
+        .filter(|(_, old, new)| {
+            let change_pct = ((new - old) / old * 100.0).abs();
+            change_pct > 3.0  // Only show moves > 3%
+        })
+        .collect();
+
+    if !significant_moves.is_empty() || result.dividends_earned > 0.01 {
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║  STOCK MARKET:                                               ║");
+
+        for (symbol, old, new) in &significant_moves {
+            let change = new - old;
+            let pct = (change / old) * 100.0;
+            let arrow = if change > 0.0 { "▲" } else { "▼" };
+            println!(
+                "║    {} ${:.2} {} {:.1}%                                      ║",
+                symbol, new, arrow, pct.abs()
+            );
+        }
+
+        if result.dividends_earned > 0.01 {
+            println!(
+                "║    Dividends earned: ${:.2}                                  ║",
+                result.dividends_earned
+            );
         }
     }
 
@@ -2568,4 +2602,343 @@ pub fn display_goodbye(game: &GameState) {
     println!("║    Net worth: ${:>10.2}                                   ║", game.player.net_worth());
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
+}
+
+// ==================== INVESTMENT MANAGEMENT ====================
+
+/// Handles the investment management submenu
+pub fn handle_manage_investments(game: &mut GameState) {
+    loop {
+        clear_screen();
+        display_investment_header(game);
+
+        println!("Investment Options:");
+        println!("  [1] View stock market");
+        println!("  [2] View portfolio");
+        println!("  [3] Buy stocks");
+        println!("  [4] Sell stocks");
+        println!("  [0] Back to main menu");
+        println!();
+
+        let input = read_input("Enter choice (0-4): ");
+        match input.trim() {
+            "1" => display_stock_market(game),
+            "2" => display_portfolio(game),
+            "3" => handle_buy_stocks(game),
+            "4" => handle_sell_stocks(game),
+            "0" => return,
+            _ => {
+                println!("Invalid choice.");
+                wait_for_enter();
+            }
+        }
+    }
+}
+
+fn display_investment_header(game: &GameState) {
+    let portfolio_value = game.portfolio_value();
+    let gain_loss = game.portfolio_gain_loss();
+    let total_dividends = game.player.total_dividends_earned();
+
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                    INVESTMENT CENTER                         ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!(
+        "║  Cash: ${:>10.2}  │  Portfolio Value: ${:>10.2}       ║",
+        game.player.cash, portfolio_value
+    );
+
+    let gain_label = if gain_loss >= 0.0 { "Gain" } else { "Loss" };
+    println!(
+        "║  Total {}: ${:>10.2}  │  Dividends Earned: ${:>8.2}  ║",
+        gain_label, gain_loss.abs(), total_dividends
+    );
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+}
+
+fn display_stock_market(game: &GameState) {
+    clear_screen();
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                      STOCK MARKET                            ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!(
+        "║  {:4} {:24} {:>8} {:>6} {:>8}   ║",
+        "SYM", "Company", "Price", "Trend", "Type"
+    );
+    println!("║  {:─<4} {:─<24} {:─>8} {:─>6} {:─>8}   ║", "", "", "", "", "");
+
+    for stock in &game.stock_market.stocks {
+        let trend = stock.trend();
+        let trend_str = format!("{:+.1}%", trend);
+        println!(
+            "║  {:4} {:24} ${:>7.2} {:>6} {:>8}   ║",
+            stock.symbol,
+            stock.name,
+            stock.price,
+            trend_str,
+            stock.stock_type.name()
+        );
+    }
+
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  Stock Types:                                                ║");
+    println!("║    Blue Chip - Low risk, pays 4% annual dividends            ║");
+    println!("║    Growth    - Medium risk, 1% dividends                     ║");
+    println!("║    Speculative - High risk/reward, no dividends              ║");
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    wait_for_enter();
+}
+
+fn display_portfolio(game: &GameState) {
+    clear_screen();
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                      YOUR PORTFOLIO                          ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+
+    if game.player.portfolio.is_empty() {
+        println!("║  You don't own any stocks yet.                               ║");
+        println!("║  Use 'Buy stocks' to start investing!                        ║");
+    } else {
+        println!(
+            "║  {:4} {:>6} {:>10} {:>10} {:>10} {:>8}  ║",
+            "SYM", "Shares", "Avg Cost", "Cur Price", "Value", "Gain/Loss"
+        );
+        println!("║  {:─<4} {:─>6} {:─>10} {:─>10} {:─>10} {:─>8}  ║", "", "", "", "", "", "");
+
+        let prices = game.get_stock_prices();
+        let mut total_value = 0.0;
+        let mut total_gain = 0.0;
+
+        for (stock_id, holding) in &game.player.portfolio {
+            if let Some(stock) = game.stock_market.get_stock(*stock_id) {
+                let current_price = prices.get(stock_id).unwrap_or(&0.0);
+                let value = holding.current_value(*current_price);
+                let gain = holding.gain_loss(*current_price);
+                total_value += value;
+                total_gain += gain;
+
+                let gain_str = if gain >= 0.0 {
+                    format!("+${:.2}", gain)
+                } else {
+                    format!("-${:.2}", gain.abs())
+                };
+
+                println!(
+                    "║  {:4} {:>6} ${:>9.2} ${:>9.2} ${:>9.2} {:>8}  ║",
+                    stock.symbol,
+                    holding.shares,
+                    holding.avg_purchase_price,
+                    current_price,
+                    value,
+                    gain_str
+                );
+            }
+        }
+
+        println!("║  {:─<4} {:─>6} {:─>10} {:─>10} {:─>10} {:─>8}  ║", "", "", "", "", "", "");
+
+        let total_gain_str = if total_gain >= 0.0 {
+            format!("+${:.2}", total_gain)
+        } else {
+            format!("-${:.2}", total_gain.abs())
+        };
+
+        println!(
+            "║  {:4} {:>6} {:>10} {:>10} ${:>9.2} {:>8}  ║",
+            "TOTL", "", "", "", total_value, total_gain_str
+        );
+    }
+
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    wait_for_enter();
+}
+
+fn handle_buy_stocks(game: &mut GameState) {
+    clear_screen();
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                       BUY STOCKS                             ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  Your cash: ${:>10.2}                                     ║", game.player.cash);
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!(
+        "║  {:2} {:4} {:24} {:>10} {:>8}     ║",
+        "ID", "SYM", "Company", "Price", "Type"
+    );
+    println!("║  {:─<2} {:─<4} {:─<24} {:─>10} {:─>8}     ║", "", "", "", "", "");
+
+    for stock in &game.stock_market.stocks {
+        println!(
+            "║  {:>2} {:4} {:24} ${:>9.2} {:>8}     ║",
+            stock.id,
+            stock.symbol,
+            stock.name,
+            stock.price,
+            stock.stock_type.name()
+        );
+    }
+
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    let stock_id = match read_number("Enter stock ID (0 to cancel): ") {
+        Some(0) => return,
+        Some(id) => id,
+        None => {
+            println!("Invalid ID.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    let stock = match game.stock_market.get_stock(stock_id) {
+        Some(s) => s,
+        None => {
+            println!("Stock not found.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    let max_shares = (game.player.cash / stock.price) as u32;
+    println!();
+    println!(
+        "Buying {} ({}) at ${:.2} per share",
+        stock.name, stock.symbol, stock.price
+    );
+    println!("You can afford up to {} shares.", max_shares);
+    println!();
+
+    let shares = match read_number("Enter number of shares (0 to cancel): ") {
+        Some(0) => return,
+        Some(s) if s > 0 => s,
+        _ => {
+            println!("Invalid number.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    match game.buy_stock(stock_id, shares) {
+        Ok(total_cost) => {
+            println!();
+            println!(
+                "SUCCESS! Bought {} shares for ${:.2}",
+                shares, total_cost
+            );
+            println!("Remaining cash: ${:.2}", game.player.cash);
+        }
+        Err(e) => {
+            println!("ERROR: {}", e);
+        }
+    }
+
+    wait_for_enter();
+}
+
+fn handle_sell_stocks(game: &mut GameState) {
+    clear_screen();
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                       SELL STOCKS                            ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+
+    if game.player.portfolio.is_empty() {
+        println!("║  You don't own any stocks to sell.                           ║");
+        println!("╚══════════════════════════════════════════════════════════════╝");
+        wait_for_enter();
+        return;
+    }
+
+    println!(
+        "║  {:2} {:4} {:>8} {:>12} {:>12}             ║",
+        "ID", "SYM", "Shares", "Cur Price", "Value"
+    );
+    println!("║  {:─<2} {:─<4} {:─>8} {:─>12} {:─>12}             ║", "", "", "", "", "");
+
+    for (stock_id, holding) in &game.player.portfolio {
+        if let Some(stock) = game.stock_market.get_stock(*stock_id) {
+            let value = holding.current_value(stock.price);
+            println!(
+                "║  {:>2} {:4} {:>8} ${:>11.2} ${:>11.2}             ║",
+                stock.id, stock.symbol, holding.shares, stock.price, value
+            );
+        }
+    }
+
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    let stock_id = match read_number("Enter stock ID (0 to cancel): ") {
+        Some(0) => return,
+        Some(id) => id,
+        None => {
+            println!("Invalid ID.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    let holding = match game.player.get_holding(stock_id) {
+        Some(h) => h.clone(),
+        None => {
+            println!("You don't own this stock.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    let stock = match game.stock_market.get_stock(stock_id) {
+        Some(s) => s,
+        None => {
+            println!("Stock not found.");
+            wait_for_enter();
+            return;
+        }
+    };
+
+    println!();
+    println!(
+        "Selling {} ({}) at ${:.2} per share",
+        stock.name, stock.symbol, stock.price
+    );
+    println!("You own {} shares.", holding.shares);
+    println!();
+
+    let input = read_input("Enter number of shares to sell (or 'all'): ");
+    let shares = if input.trim().to_lowercase() == "all" {
+        holding.shares
+    } else {
+        match input.trim().parse::<u32>() {
+            Ok(0) => return,
+            Ok(s) => s,
+            Err(_) => {
+                println!("Invalid number.");
+                wait_for_enter();
+                return;
+            }
+        }
+    };
+
+    match game.sell_stock(stock_id, shares) {
+        Ok(proceeds) => {
+            let gain = proceeds - holding.avg_purchase_price * shares as f64;
+            println!();
+            println!("SUCCESS! Sold {} shares for ${:.2}", shares, proceeds);
+            if gain >= 0.0 {
+                println!("Profit: ${:.2}", gain);
+            } else {
+                println!("Loss: ${:.2}", gain.abs());
+            }
+            println!("New cash balance: ${:.2}", game.player.cash);
+        }
+        Err(e) => {
+            println!("ERROR: {}", e);
+        }
+    }
+
+    wait_for_enter();
 }
